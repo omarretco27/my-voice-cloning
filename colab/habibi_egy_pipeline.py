@@ -59,6 +59,12 @@ def patch_torchaudio_soundfile():
     import torch
     import torchaudio
 
+    # تعطيل cuDNN الفرعي لتفادي خطأ CUDNN_STATUS_SUBLIBRARY_VERSION_MISMATCH على Google Colab CUDA 13
+    # مع الإبقاء الكامل على تسريع كرت الشاشة T4 GPU عبر نوى CUDA الأصيلة في PyTorch!
+    torch.backends.cudnn.enabled = False
+    if hasattr(torch.backends.cuda, "enable_cudnn_sdp"):
+        torch.backends.cuda.enable_cudnn_sdp(False)
+
     if getattr(torchaudio, "_ruwaq_sf_patched", False):
         return
 
