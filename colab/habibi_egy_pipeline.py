@@ -1,16 +1,13 @@
 #!/usr/bin/env python3
-"""habibi_egy_pipeline.py — استوديو «رِواق» الخفيف للعامية المصرية (Habibi-TTS Specialized/EGY + OpenVoice V2)
+"""habibi_egy_pipeline.py — استوديو «رِواق» للعامية المصرية (Habibi-TTS Specialized/EGY + OpenVoice V2) v2.0
 
-مُصمَّم خصيصاً لحل جميع عوائق تقرير VL-NCR-002 / CA-02 دفعة واحدة:
-  1) صفر استهلاك من مساحة Google Drive (0 MB): يحمّل الأوزان في قرص Colab المؤقت (/content/models_cache - 100GB)
-     علاجاً لمشكلة امتلاء درايف بنسبة 91% (13.68GB / 15GB).
-  2) إصلاح عيب CA-02-D01 جذرياً: يستخدم حصرياً أوزان Specialized/EGY بترخيص Apache-2.0 التجاري مع
-     dialect_id=None (بدون رموز ⑥〈…〉 الخاصة بـ Unified) وفحص مسبق لخلو النص من الرموز المجهولة (No-OOV).
-  3) ترقيع توافق OpenVoice V2 مع Python 3.12 و PyTorch 2.6+ و librosa 0.11+ (إصلاح return_complex=True و librosa.filters.mel).
-  4) يشتغل فوراً بعينتيك الموجودتين بالفعل:
-     - B_shared_7000ms.wav (7 ثوانٍ + نصها المؤكد) لتوجيه Habibi-TTS المصري (S1)
-     - B_new_10800ms.wav (10.8 ثانية) لتعزيز بصمة خامة عمر عبر OpenVoice V2 (S2)
-     - ثم تمرير اختياري على سلسلة استوديو رِواق scripts/voice_finish.py (48kHz · -16 LUFS · -1.0 dBTP) (S3).
+الإصلاحات الهندسية الكاملة في هذا الإصدار:
+  1) ترقيع torchaudio.load و torchaudio.save عبر soundfile لتفادي عطل TorchCodec في PyTorch/TorchAudio 2.9+ على Colab.
+  2) القص الذكي التلقائي للمقطع المرجعي إذا تجاوز 10 ثوانٍ (تجنباً لانفجار معادلة 22 - duration في Habibi-TTS عند رفع ملفات 17-25 ثانية مثل 03.wav و 04.wav).
+  3) تفريغ نصي تلقائي للمقطع المرجعي عبر Faster-Whisper (large-v3-turbo) إذا تُرك نص المرجع فارغاً، مع إضافة مسافة فاصلة إلزامية للنص العربي.
+  4) إصلاح عيب CA-02-D01 رسمياً: dialect_id=None مع أوزان Specialized/EGY (Apache-2.0 التجاري).
+  5) ترقيع OpenVoice V2 للعمل مع PyTorch الحديث (return_complex=True) و librosa >= 0.11.
+  6) اصطياد وعرض أي خطأ بوضوح بالعربية بدلاً من رسائل Error المبهمة في Gradio.
 """
 from __future__ import annotations
 
@@ -21,6 +18,7 @@ import os
 import re
 import shutil
 import sys
+import traceback
 import zipfile
 from pathlib import Path
 import numpy as np
@@ -31,25 +29,47 @@ SCRIPTS_DIR = REPO_ROOT / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
+for extra_src in ("/content/Habibi-TTS/src", "/content/OpenVoice"):
+    if os.path.exists(extra_src) and extra_src not in sys.path:
+        sys.path.insert(0, extra_src)
+
 import voice_finish
+import prepare_dataset
 import transcribe_to_meta
 
-# المسارات المؤقتة على قرص كولاب السريع (لا تستهلك شيئاً من 15GB الخاصة بـ Google Drive)
 CACHE_DIR = Path(os.environ.get("RUWAQ_LOCAL_CACHE", "/content/ruwaq_local_cache"))
 os.environ.setdefault("HF_HOME", str(CACHE_DIR / "hf"))
 
 DEFAULT_BENCHMARK_TEXT = "إزيّك، أنا عمر. خلّينا نحكي الحكاية بهدوء، واحدة واحدة."
 
-_HABIBI_STATE = {"ema_model": None, "vocoder": None, "vocab_set": None, "ckpt_sha256": None}
-_OPENVOICE_STATE = {"converter": None, "ckpt_sha256": None}
+_HABIBI_STATE = {"ema_model": None, "vocoder": None, "vocab_set": None}
+_OPENVOICE_STATE = {"converter": None}
+_WHISPER_REF_CACHE: dict[str, tuple[str, str]] = {}
 
 
-def sha256_file(path: str | Path) -> str:
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            h.update(chunk)
-    return h.hexdigest()
+# ── ترقيع شامل لـ torchaudio.load لتفادي عطل TorchCodec على Google Colab 2026 ──
+def patch_torchaudio_soundfile():
+    import torch
+    import torchaudio
+
+    if getattr(torchaudio, "_ruwaq_sf_patched", False):
+        return
+
+    def _safe_ta_load(filepath, *args, **kwargs):
+        data, sr = sf.read(str(filepath), dtype="float32", always_2d=True)
+        # soundfile يرجع (frames, channels)، بينما torchaudio يتوقع (channels, frames)
+        tensor = torch.from_numpy(np.ascontiguousarray(data.T))
+        return tensor, int(sr)
+
+    def _safe_ta_save(filepath, src, sample_rate, *args, **kwargs):
+        arr = src.detach().cpu().numpy()
+        if arr.ndim == 2:
+            arr = arr.T
+        sf.write(str(filepath), arr, int(sample_rate), subtype="PCM_16")
+
+    torchaudio.load = _safe_ta_load
+    torchaudio.save = _safe_ta_save
+    torchaudio._ruwaq_sf_patched = True
 
 
 def set_deterministic_seed(seed: int = 42):
@@ -63,8 +83,69 @@ def set_deterministic_seed(seed: int = 42):
         torch.cuda.manual_seed_all(seed)
 
 
+# ── تجهيز وتفريغ المقطع المرجعي بأمان (≤ 9.5 ثانية) لـ Habibi-TTS ──────────────
+def prepare_safe_habibi_reference(ref_audio_path: str, ref_text: str = "") -> tuple[str, str]:
+    """
+    يضمن ألا يتجاوز المقطع المرجعي 9.5 ثانية (حيث إن نافذة Habibi/F5 الكلية 22 ثانية شاملة المرجع والتوليد)،
+    ويفرّغ نصه بدقة عبر Faster-Whisper إذا لم يُكتب نص المرجع يدوياً.
+    """
+    cache_key = f"{os.path.abspath(ref_audio_path)}::{os.path.getsize(ref_audio_path)}::{(ref_text or '').strip()}"
+    if cache_key in _WHISPER_REF_CACHE:
+        return _WHISPER_REF_CACHE[cache_key]
+
+    x = prepare_dataset.load_audio_mono_48k(ref_audio_path, 24000)
+    sr = 24000
+    dur = len(x) / sr
+
+    safe_dir = CACHE_DIR / "prepared_refs"
+    safe_dir.mkdir(parents=True, exist_ok=True)
+    digest = hashlib.md5(cache_key.encode("utf-8")).hexdigest()[:10]
+    safe_wav = str(safe_dir / f"habibi_ref_{digest}.wav")
+
+    was_trimmed = False
+    if dur > 10.2:
+        # استخراج أنقى مقطع كلام طبيعي بطول 6–9.5 ثانية بدلاً من إرسال ملف 20+ ثانية يكسر المعادلة
+        chunks = prepare_dataset.slice_on_pauses(x, sr=sr, min_sec=5.5, max_sec=9.2)
+        if chunks:
+            best = max(chunks, key=lambda c: float(np.sqrt(np.mean(c ** 2))))
+            x = best
+        else:
+            x = x[: int(9.0 * sr)]
+        was_trimmed = True
+        print(f"✂ تم قص المرجع تلقائياً من {dur:.1f}s إلى {len(x)/sr:.2f}s ليناسب نافذة Habibi-TTS القياسية.")
+
+    # معايرة آمنة للذروة
+    mx = float(np.max(np.abs(x)))
+    if mx > 0.005:
+        x = (x / mx * 0.85).astype(np.float32)
+    sf.write(safe_wav, x, sr, subtype="PCM_16")
+
+    final_ref_text = (ref_text or "").strip()
+    if not final_ref_text or was_trimmed:
+        print("📝 جاري استخراج النص الحرفي للمقطع المرجعي عبر Faster-Whisper لضمان مطابقة المخارج...")
+        _, transcribed = transcribe_to_meta.transcribe_file(safe_wav, model_size="auto")
+        final_ref_text = transcribed.strip()
+        # تحرير ذاكرة Whisper قبل تحميل Habibi-TTS
+        gc.collect()
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+
+    if not final_ref_text:
+        final_ref_text = "بسم الله الرحمن الرحيم، أهلاً بيكم في رواق."
+
+    # مهم جداً في Habibi-TTS مع الحروف العربية (2-byte UTF-8): إضافة مسافة فاصلة في نهاية نص المرجع!
+    final_ref_text = final_ref_text.strip() + "  "
+    _WHISPER_REF_CACHE[cache_key] = (safe_wav, final_ref_text)
+    return safe_wav, final_ref_text
+
+
 # ── 1) محرك Habibi-TTS Specialized/EGY (Apache-2.0 · dialect_id=None) ────────
 def load_habibi_egy(device: str | None = None):
+    patch_torchaudio_soundfile()
     import torch
     from importlib.resources import files
     from huggingface_hub import hf_hub_download
@@ -78,7 +159,7 @@ def load_habibi_egy(device: str | None = None):
     if _HABIBI_STATE["ema_model"] is not None:
         return _HABIBI_STATE["ema_model"], _HABIBI_STATE["vocoder"], _HABIBI_STATE["vocab_set"], device
 
-    print(f"⏳ تحميل Habibi-TTS [Specialized/EGY · Apache-2.0] على {device} (في قرص كولاب المؤقت بدون استهلاك Drive)...")
+    print(f"⏳ تحميل Habibi-TTS [Specialized/EGY · Apache-2.0] على {device}...")
     ckpt_path = hf_hub_download(
         repo_id="SWivid/Habibi-TTS",
         filename="Specialized/EGY/model_100000.safetensors",
@@ -90,9 +171,7 @@ def load_habibi_egy(device: str | None = None):
         cache_dir=str(CACHE_DIR / "hf"),
     )
 
-    vocab_lines = Path(vocab_path).read_text(encoding="utf-8").splitlines()
-    vocab_set = set(vocab_lines)
-
+    vocab_set = set(Path(vocab_path).read_text(encoding="utf-8").splitlines())
     cfg_path = str(files("f5_tts").joinpath("configs/F5TTS_v1_Base.yaml"))
     model_cfg = OmegaConf.load(cfg_path)
     model_cls = get_class(f"f5_tts.model.{model_cfg.model.backbone}")
@@ -112,14 +191,11 @@ def load_habibi_egy(device: str | None = None):
         "ema_model": ema_model,
         "vocoder": vocoder,
         "vocab_set": vocab_set,
-        "ckpt_path": ckpt_path,
-        "vocab_path": vocab_path,
     })
     return ema_model, vocoder, vocab_set, device
 
 
 def check_text_no_dialect_tags_and_oov(text: str, vocab_set: set[str]) -> dict:
-    """حارس CA-02-D01: منع أي رموز لهجة Unified مثل ⑥〈…〉 وفحص الأحرف خارج المفردات."""
     cleaned = re.sub(r"⑥〈[^〉]*〉", "", text).strip()
     had_unified_tag = cleaned != text.strip()
     oov_chars = sorted({ch for ch in cleaned if not ch.isspace() and ch not in vocab_set})
@@ -140,21 +216,19 @@ def synthesize_s1_habibi_egy(
     cfg_strength: float = 2.0,
     speed: float = 1.0,
 ) -> dict:
-    """توليد S1 عبر Habibi-TTS Specialized/EGY مع dialect_id=None صريحاً (إصلاح CA-02-D01)."""
-    from f5_tts.infer.utils_infer import preprocess_ref_audio_text
+    patch_torchaudio_soundfile()
+    safe_ref_wav, safe_ref_text = prepare_safe_habibi_reference(ref_audio_path, ref_text)
+    ema_model, vocoder, vocab_set, device = load_habibi_egy()
+
     from habibi_tts.infer.utils_infer import infer_process
 
-    ema_model, vocoder, vocab_set, device = load_habibi_egy()
     guard = check_text_no_dialect_tags_and_oov(gen_text, vocab_set)
-
-    # إذا ترك المستخدم نص المرجع فارغاً، يفرغه preprocess_ref_audio_text تلقائياً أو نستخدم النص المؤكد
-    ref_audio_proc, ref_text_proc = preprocess_ref_audio_text(ref_audio_path, ref_text or "")
-
     set_deterministic_seed(seed)
-    # ملاحظة حاسمة (إصلاح CA-02-D01): dialect_id=None إلزامي مع Specialized/EGY!
+
+    # تمرير المرجع المجهز مباشرة إلى infer_process مع dialect_id=None (إصلاح CA-02-D01)
     wav_arr, sr, _ = infer_process(
-        ref_audio_proc,
-        ref_text_proc,
+        safe_ref_wav,
+        safe_ref_text,
         guard["clean_text"],
         ema_model,
         vocoder,
@@ -166,6 +240,9 @@ def synthesize_s1_habibi_egy(
         dialect_id=None,
     )
 
+    if wav_arr is None or len(wav_arr) == 0:
+        raise RuntimeError("لم ينتج محرك Habibi-TTS عينات صوتية؛ تحقق من النص المدخل.")
+
     wav_arr = np.asarray(wav_arr, dtype=np.float32)
     os.makedirs(os.path.dirname(os.path.abspath(out_s1_wav)), exist_ok=True)
     sf.write(out_s1_wav, wav_arr, int(sr), subtype="PCM_16")
@@ -174,7 +251,7 @@ def synthesize_s1_habibi_egy(
         "s1_wav": out_s1_wav,
         "sr": int(sr),
         "duration_s": round(len(wav_arr) / sr, 3),
-        "ref_text_used": ref_text_proc,
+        "ref_text_used": safe_ref_text.strip(),
         "gen_text_used": guard["clean_text"],
         "dialect_id_used": None,
         "oov_chars": guard["oov_chars"],
@@ -183,9 +260,8 @@ def synthesize_s1_habibi_egy(
     }
 
 
-# ── 2) محرك OpenVoice V2 مع ترقيع التوافق الحديث لـ PyTorch 2.6+ و Librosa 0.11+ ──
+# ── 2) محرك OpenVoice V2 مع ترقيع التوافق الحديث ─────────────────────────────
 def _patch_openvoice_modern_pytorch_librosa():
-    """إصلاح أعطال OpenVoice المعروفة على PyTorch >= 2.2 (return_complex=False) و librosa >= 0.10."""
     import librosa
     import torch
     import openvoice.mel_processing as mp
@@ -222,6 +298,7 @@ def _patch_openvoice_modern_pytorch_librosa():
 
 
 def load_openvoice_v2(device: str | None = None):
+    patch_torchaudio_soundfile()
     import torch
     from huggingface_hub import hf_hub_download
 
@@ -260,7 +337,6 @@ def convert_s2_openvoice(
     out_s2_wav: str,
     tau: float = 0.3,
 ) -> dict:
-    """تحويل S1 إلى بصمة مرجع عمر (B_new_10800ms.wav) باستخدام استخراج SE الأصلي من الملفين."""
     converter, _ = load_openvoice_v2()
     src_se = converter.extract_se([s1_wav_path])
     tgt_se = converter.extract_se([target_ref_wav_path])
@@ -281,7 +357,6 @@ def convert_s2_openvoice(
     }
 
 
-# ── 3) تشغيل اختبار المقارنة الثلاثي (S1 vs S2 vs S3 Riwaq Master) ─────────────
 def run_ablation_test(
     gen_text: str,
     ref_shared_7s: str,
@@ -294,249 +369,100 @@ def run_ablation_test(
     tau: float = 0.3,
     master_source_choice: str = "S1",
 ) -> tuple[str | None, str | None, str | None, str]:
-    if not ref_shared_7s or not os.path.exists(ref_shared_7s):
-        return None, None, None, "⚠️ يُرجى رفع ملف المرجع الأول (`B_shared_7000ms.wav` — 7 ثوانٍ) أولاً."
-    if not (gen_text or "").strip():
-        return None, None, None, "⚠️ يُرجى كتابة النص المراد توليده."
+    try:
+        if not ref_shared_7s or not os.path.exists(ref_shared_7s):
+            return None, None, None, "⚠️ يُرجى رفع ملف صوتي مرجعي أولاً في المربع رقم (1) بالأعلى قبل الضغط على زر التشغيل!"
+        if not (gen_text or "").strip():
+            return None, None, None, "⚠️ يُرجى كتابة النص المراد توليده."
 
-    out_dir = CACHE_DIR / "outputs_ablation"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    s1_path = str(out_dir / "S1_Habibi_EGY_native.wav")
-    s2_path = str(out_dir / "S2_Habibi_plus_OpenVoiceV2.wav")
-    s3_path = str(out_dir / "S3_Riwaq_Studio_Master_48k.wav")
+        out_dir = CACHE_DIR / "outputs_ablation"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        s1_path = str(out_dir / "S1_Habibi_EGY_native.wav")
+        s2_path = str(out_dir / "S2_Habibi_plus_OpenVoiceV2.wav")
+        s3_path = str(out_dir / "S3_Riwaq_Studio_Master_48k.wav")
 
-    s1_info = synthesize_s1_habibi_egy(
-        gen_text=gen_text,
-        ref_audio_path=ref_shared_7s,
-        ref_text=(ref_shared_transcript or "").strip(),
-        out_s1_wav=s1_path,
-        seed=int(seed),
-        nfe_step=int(nfe_step),
-        cfg_strength=float(cfg_strength),
-        speed=float(speed),
-    )
-
-    tgt_ref = ref_new_10s if (ref_new_10s and os.path.exists(ref_new_10s)) else ref_shared_7s
-    s2_info = convert_s2_openvoice(
-        s1_wav_path=s1_path,
-        target_ref_wav_path=tgt_ref,
-        out_s2_wav=s2_path,
-        tau=float(tau),
-    )
-
-    chosen_for_master = s1_path if master_source_choice == "S1" else s2_path
-    s3_info = voice_finish.finish(
-        chosen_for_master,
-        s3_path,
-        target_lufs=-16.0,
-        target_centroid=380.0,
-        sr_out=48000,
-        verbose=True,
-    )
-
-    oov_note = "لا يوجد (0 OOV ✅)" if not s1_info["oov_chars"] else f"⚠️ أحرف خارج المفردات: {s1_info['oov_chars']}"
-    report = (
-        f"### ✅ اكتمل التوليد والمقارنة في ثوانٍ (تراخيص تجارية نظيفة: Apache-2.0 + MIT · استهلاك Drive = 0 MB)\n"
-        f"- **فحص `CA-02-D01`:** `dialect_id = None` (تم إثبات عدم حقن رموز Unified) · المفردات: {oov_note}\n"
-        f"- **نص المرجع المعتمد لـ S1:** `{s1_info['ref_text_used']}`\n"
-        f"- **`S1` (Habibi-TTS EGY الخام):** `{s1_info['duration_s']}s` @ `{s1_info['sr']}Hz`\n"
-        f"- **`S2` (بعد محوّل OpenVoice V2 · `tau={tau}`):** `{s2_info['duration_s']}s` @ `{s2_info['sr']}Hz`\n"
-        f"- **`S3` (ماستر استوديو رِواق من `{master_source_choice}`):** `48000Hz` · `LUFS {s3_info['post_lufs']}` · `Peak {s3_info['peak_dbtp']} dBTP` · `Centroid {s3_info['centroid_hz']}Hz`\n\n"
-        f"👂 **قرار الاعتماد بأذنك أنت فقط:** اسمع الثلاثة بالترتيب واختار أنقاهم لهوية رِواق!"
-    )
-    return s1_path, s2_path, s3_path, report
-
-
-# ── 4) توليد حزمة حلقة كاملة لنظام «رِواق» بنفس المحرك المختار ────────────────
-def build_full_episode_zip_habibi(
-    project_id: str,
-    scenes_script: str,
-    ref_shared_7s: str,
-    ref_shared_transcript: str,
-    ref_new_10s: str | None,
-    use_openvoice_s2: bool = False,
-    tau: float = 0.3,
-    speed: float = 1.0,
-    run_whisper: bool = True,
-) -> tuple[str | None, str | None, str]:
-    if not ref_shared_7s or not os.path.exists(ref_shared_7s):
-        return None, None, "⚠️ ارفع ملف المرجع `B_shared_7000ms.wav` أولاً."
-
-    pid = re.sub(r"[^A-Za-z0-9_\-]", "_", (project_id or "EP_001").strip())
-    blocks = [b.strip() for b in re.split(r"\n\s*\n+", (scenes_script or "").strip()) if b.strip()]
-    if not blocks:
-        return None, None, "⚠️ اكتب نص المشاهد أولاً."
-
-    ep_root = CACHE_DIR / "episodes" / pid
-    if ep_root.exists():
-        shutil.rmtree(ep_root)
-    audio_dir = ep_root / "public" / "projects" / pid / "audio"
-    data_dir = ep_root / "data" / "projects" / pid
-    outputs_dir = ep_root / "outputs"
-    reports_dir = ep_root / "reports"
-    work_dir = ep_root / "_work"
-    for d in (audio_dir, data_dir, outputs_dir, reports_dir, work_dir):
-        d.mkdir(parents=True, exist_ok=True)
-
-    tgt_ref = ref_new_10s if (ref_new_10s and os.path.exists(ref_new_10s)) else ref_shared_7s
-    vo_meta = []
-    vo_whisper = []
-    preview_parts = []
-    cursor_s = 0.2
-
-    for idx, blk in enumerate(blocks, start=1):
-        first = blk.splitlines()[0].strip()
-        parts = [p.strip() for p in first.split("|")]
-        if len(parts) >= 3 and re.match(r"^[A-Za-z0-9_\-]+$", parts[0]):
-            name = parts[0].replace(".wav", "")
-            try:
-                t_in = float(parts[1])
-            except ValueError:
-                t_in = cursor_s
-            text = ("|".join(parts[2:]) + " " + " ".join(blk.splitlines()[1:])).strip()
-        else:
-            name = f"vo_{idx:02d}"
-            t_in = cursor_s
-            text = " ".join(x.strip() for x in blk.splitlines() if x.strip())
-
-        s1_w = str(work_dir / f"{name}_s1.wav")
-        s2_w = str(work_dir / f"{name}_s2.wav")
-        fin_w = str(audio_dir / f"{name}.wav")
-
-        synthesize_s1_habibi_egy(
-            gen_text=text,
+        s1_info = synthesize_s1_habibi_egy(
+            gen_text=gen_text,
             ref_audio_path=ref_shared_7s,
             ref_text=(ref_shared_transcript or "").strip(),
-            out_s1_wav=s1_w,
-            seed=42,
-            nfe_step=32,
-            speed=speed,
+            out_s1_wav=s1_path,
+            seed=int(seed),
+            nfe_step=int(nfe_step),
+            cfg_strength=float(cfg_strength),
+            speed=float(speed),
         )
-        if use_openvoice_s2:
-            convert_s2_openvoice(s1_w, tgt_ref, s2_w, tau=tau)
-            src_w = s2_w
-        else:
-            src_w = s1_w
 
-        info = voice_finish.finish(src_w, fin_w, target_lufs=-16.0, target_centroid=380.0, sr_out=48000, verbose=True)
-        vo_meta.append({"src": f"projects/{pid}/audio/{name}.wav", "t_in": round(t_in, 2), "volume_db": 0})
-        vo_whisper.append({"path": fin_w, "t_in": round(t_in, 2)})
-        cursor_s = round(t_in + info["duration_s"] + 0.55, 2)
+        tgt_ref = ref_new_10s if (ref_new_10s and os.path.exists(ref_new_10s)) else ref_shared_7s
+        s2_info = convert_s2_openvoice(
+            s1_wav_path=s1_path,
+            target_ref_wav_path=tgt_ref,
+            out_s2_wav=s2_path,
+            tau=float(tau),
+        )
 
-        seg, _ = sf.read(fin_w, dtype="float32")
-        preview_parts.append(seg)
-        preview_parts.append(np.zeros(int(0.55 * 48000), dtype="float32"))
+        chosen_for_master = s1_path if master_source_choice == "S1" else s2_path
+        s3_info = voice_finish.finish(
+            chosen_for_master,
+            s3_path,
+            target_lufs=-16.0,
+            target_centroid=380.0,
+            sr_out=48000,
+            verbose=True,
+        )
 
-    preview_wav = str(ep_root / f"PREVIEW_{pid}.wav")
-    sf.write(preview_wav, np.concatenate(preview_parts), 48000, subtype="PCM_16")
-
-    # بناء episode_meta.json ونسخ الموسيقى من القالب الذهبي
-    tmpl = REPO_ROOT / "data" / "projects" / "GOLDEN_001" / "episode_meta.json"
-    meta = json.loads(tmpl.read_text(encoding="utf-8")) if tmpl.exists() else {"schema_version": "2.0", "project": {}}
-    total_dur = max(15, int(round(cursor_s + 2.5)))
-    meta["project"]["id"] = pid
-    meta["audio"]["vo"] = vo_meta
-    meta["edit"]["duration_s"] = total_dur
-    meta["audio"]["music"] = {"src": f"projects/{pid}/audio/music.wav", "t_in": 0, "t_out": total_dur, "volume_db": -24}
-
-    golden_aud = REPO_ROOT / "public" / "projects" / "GOLDEN_001" / "audio"
-    for fn in ("music.wav", "stinger_in.wav", "stinger_out.wav"):
-        if (golden_aud / fn).exists():
-            shutil.copy2(golden_aud / fn, audio_dir / fn)
-
-    meta_out = str(data_dir / "episode_meta.json")
-    Path(meta_out).write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
-
-    if run_whisper:
-        transcribe_to_meta.run_episode_transcription(vo_whisper, project_id=pid, out_dir=str(outputs_dir), meta_path=meta_out)
-
-    shutil.rmtree(work_dir, ignore_errors=True)
-    zip_out = str(CACHE_DIR / f"{pid}_riwaq_pack.zip")
-    with zipfile.ZipFile(zip_out, "w", zipfile.ZIP_DEFLATED) as zf:
-        for p in ep_root.rglob("*"):
-            if p.is_file() and p.name != os.path.basename(preview_wav):
-                zf.write(p, p.relative_to(ep_root))
-
-    return preview_wav, zip_out, f"✅ تم بناء حزمة الحلقة `{pid}` بالكامل وجاهزة للتحميل المباشر (`{zip_out}`) بدون استهلاك بايت واحد من Google Drive!"
+        oov_note = "لا يوجد (0 OOV ✅)" if not s1_info["oov_chars"] else f"⚠️ أحرف خارج المفردات: {s1_info['oov_chars']}"
+        report = (
+            f"### ✅ اكتمل التوليد والمقارنة بنجاح!\n"
+            f"- **فحص `CA-02-D01`:** `dialect_id = None` · المفردات: {oov_note}\n"
+            f"- **نص المرجع المستخدم:** `{s1_info['ref_text_used']}`\n"
+            f"- **`S1` (Habibi-TTS EGY الأصلي):** `{s1_info['duration_s']}s` @ `{s1_info['sr']}Hz`\n"
+            f"- **`S2` (بعد محوّل OpenVoice V2):** `{s2_info['duration_s']}s` @ `{s2_info['sr']}Hz`\n"
+            f"- **`S3` (ماستر استوديو رِواق):** `48000Hz` · `LUFS {s3_info['post_lufs']}` · `Peak {s3_info['peak_dbtp']} dBTP` · `Centroid {s3_info['centroid_hz']}Hz`"
+        )
+        return s1_path, s2_path, s3_path, report
+    except Exception as exc:
+        tb = traceback.format_exc()
+        print(tb, file=sys.stderr)
+        return None, None, None, f"### ❌ حدث خطأ تقني — التفاصيل الكاملة للتشخيص:\n```text\n{exc}\n\n{tb}\n```"
 
 
 def launch_habibi_gradio(share: bool = True):
     import gradio as gr
 
-    with gr.Blocks(title="Ruwaq Habibi-EGY + OpenVoice V2 Studio (Zero Drive Storage)") as demo:
+    with gr.Blocks(title="Ruwaq Habibi-EGY + OpenVoice V2 Studio v2.0") as demo:
         gr.Markdown(
-            "# 🎙️ مختبر «رِواق» للعامية المصرية (`Habibi-TTS Specialized/EGY` + `OpenVoice V2`)\n"
-            "**مُصحَّح بالكامل من عيب `CA-02-D01` (`dialect_id=None`) · تراخيص تجارية معتمدة (`Apache-2.0` + `MIT`) · صفر استهلاك من مساحة Google Drive!**"
+            "# 🎙️ مختبر «رِواق» للعامية المصرية (`Habibi-TTS Specialized/EGY` + `OpenVoice V2`) — الإصدار 2.0\n"
+            "**مُصحَّح من أعطال `TorchCodec` وطول المقطع المرجعي وعيب `CA-02-D01`!**"
         )
-
         with gr.Row():
-            ref7_in = gr.Audio(label="1️⃣ ارفع المقطع المرجعي الأول (B_shared_7000ms.wav — 7 ثوانٍ)", type="filepath")
-            ref10_in = gr.Audio(label="2️⃣ ارفع المقطع المرجعي الثاني لـ OpenVoice (B_new_10800ms.wav — 10.8 ثانية · اختياري)", type="filepath")
+            ref7_in = gr.Audio(label="1️⃣ ارفع أي ملف صوتي بصوتك (حتى لو طويل — سيختار الكود أنقى 8 ثوانٍ منه تلقائياً!)", type="filepath")
+            ref10_in = gr.Audio(label="2️⃣ ملف مرجعي ثانٍ لـ OpenVoice (اختياري)", type="filepath")
 
         ref_txt_in = gr.Textbox(
-            label="النص العربي الحرفي للمقطع الأول (B_shared_7000ms) — اتركه فارغاً فقط إذا أردت التفريغ التلقائي، ويُفضّل لصق النص المؤكد لدقة أعلى",
+            label="النص العربي للمرجع (اختياري — اتركه فارغاً وسيفرّغه Faster-Whisper تلقائياً!)",
             lines=2,
-            placeholder="اكتب هنا النص المنطوق في مقطع الـ 7 ثوانٍ بالضبط...",
+        )
+        gen_txt_in = gr.Textbox(label="النص المصري المراد نطقه بصوت عمر", lines=3, value=DEFAULT_BENCHMARK_TEXT)
+        with gr.Row():
+            seed_in = gr.Number(value=42, precision=0, label="Seed")
+            nfe_in = gr.Slider(16, 64, value=32, step=4, label="خطوات الجودة NFE")
+            cfg_in = gr.Slider(1.0, 3.5, value=2.0, step=0.2, label="CFG")
+            spd_in = gr.Slider(0.8, 1.2, value=1.0, step=0.05, label="Speed")
+            tau_in = gr.Slider(0.1, 0.8, value=0.3, step=0.05, label="OpenVoice tau")
+            m_choice = gr.Radio(["S1", "S2"], value="S1", label="مصدر الماستر S3")
+
+        btn_test = gr.Button("🚀 شغّل الاختبار المزدوج (S1 + S2 + S3 Master)", variant="primary")
+        with gr.Row():
+            s1_out = gr.Audio(label="S1: Habibi-TTS EGY الأصلي", type="filepath")
+            s2_out = gr.Audio(label="S2: بعد OpenVoice V2", type="filepath")
+            s3_out = gr.Audio(label="S3: ماستر استوديو رِواق (48kHz / -16 LUFS)", type="filepath")
+        rep_md = gr.Markdown()
+
+        btn_test.click(
+            fn=run_ablation_test,
+            inputs=[gen_txt_in, ref7_in, ref_txt_in, ref10_in, seed_in, nfe_in, cfg_in, spd_in, tau_in, m_choice],
+            outputs=[s1_out, s2_out, s3_out, rep_md],
         )
 
-        with gr.Tabs():
-            with gr.TabItem("🔬 1) اختبار استعادة الهوية (CA-02: S1 vs S2 vs S3 Master)"):
-                gen_txt_in = gr.Textbox(
-                    label="النص المصري الجديد المراد نطقه بصوت عمر",
-                    lines=3,
-                    value=DEFAULT_BENCHMARK_TEXT,
-                )
-                with gr.Row():
-                    seed_in = gr.Number(value=42, precision=0, label="Seed")
-                    nfe_in = gr.Slider(16, 64, value=32, step=4, label="خطوات الجودة NFE (32 قياسي)")
-                    cfg_in = gr.Slider(1.0, 3.5, value=2.0, step=0.2, label="قوة التوجيه CFG")
-                    spd_in = gr.Slider(0.8, 1.2, value=1.0, step=0.05, label="السرعة Speed")
-                    tau_in = gr.Slider(0.1, 0.8, value=0.3, step=0.05, label="قوة تحويل OpenVoice (tau)")
-                    m_choice = gr.Radio(["S1", "S2"], value="S1", label="مصدر الماستر النهائي S3")
-
-                btn_test = gr.Button("🚀 شغّل الاختبار المزدوج (S1 + S2 + S3 Master) في ثوانٍ", variant="primary")
-                with gr.Row():
-                    s1_out = gr.Audio(label="S1: Habibi-TTS EGY الأصلي (24kHz)", type="filepath")
-                    s2_out = gr.Audio(label="S2: بعد تحويل OpenVoice V2", type="filepath")
-                    s3_out = gr.Audio(label="S3: بعد سلسلة استوديو رِواق (48kHz / -16 LUFS)", type="filepath")
-                rep_md = gr.Markdown()
-
-                btn_test.click(
-                    fn=run_ablation_test,
-                    inputs=[gen_txt_in, ref7_in, ref_txt_in, ref10_in, seed_in, nfe_in, cfg_in, spd_in, tau_in, m_choice],
-                    outputs=[s1_out, s2_out, s3_out, rep_md],
-                )
-
-            with gr.TabItem("🎬 2) إنتاج حزمة حلقة «رِواق» كاملة (بدون Google Drive)"):
-                with gr.Row():
-                    ep_id = gr.Textbox(value="EP_001", label="معرّف الحلقة (Project ID)")
-                    use_ov = gr.Checkbox(value=False, label="تمرير على OpenVoice V2 قبل الماسترينج (فعّلها إذا أعجبك S2 أكثر من S1)")
-                    use_wh = gr.Checkbox(value=True, label="توليد كابشنز Faster-Whisper وتحديث episode_meta.json")
-                ep_script = gr.Textbox(
-                    label="سكريبت مشاهد الحلقة (افصل كل مشهد بسطر فارغ)",
-                    lines=7,
-                    value="في زاوية بعيدة من ذاكرة المدن، حكاية محدش فكر يفتح دفاترها من سبعمئة سنة.\n\nأكتر من 73% من المخطوطات القديمة لسه متقريتش، بس كل سطر فيها بيحكي سر جديد.",
-                )
-                btn_ep = gr.Button("📦 توليد حزمة الحلقة الكاملة (<ID>_riwaq_pack.zip)", variant="primary")
-                ep_prev = gr.Audio(label="معاينة صوت الحلقة الماستر", type="filepath")
-                ep_zip = gr.File(label="تحميل ملف ZIP الجاهز لمستودع رِواق")
-                ep_msg = gr.Markdown()
-
-                btn_ep.click(
-                    fn=lambda pid, scr, r7, rt, r10, uov, tau_v, spd_v, uwh: build_full_episode_zip_habibi(
-                        project_id=pid,
-                        scenes_script=scr,
-                        ref_shared_7s=r7,
-                        ref_shared_transcript=rt,
-                        ref_new_10s=r10,
-                        use_openvoice_s2=uov,
-                        tau=tau_v,
-                        speed=spd_v,
-                        run_whisper=uwh,
-                    ),
-                    inputs=[ep_id, ep_script, ref7_in, ref_txt_in, ref10_in, use_ov, tau_in, spd_in, use_wh],
-                    outputs=[ep_prev, ep_zip, ep_msg],
-                )
-
-    demo.launch(share=share, inline=True, debug=False)
+    demo.launch(share=share, inline=True, debug=True)
     return demo
