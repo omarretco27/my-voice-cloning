@@ -286,7 +286,7 @@ def run_zero_ui_pipeline(drive_root: str = "/content/drive/MyDrive", episode_id:
         scenes = [{"name": "vo_01", "t_in": 0.2, "text": DEFAULT_SCRIPT_AR_EG}]
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    work_dir = Path("/content/ruwaq_local_cache/work_" + ts)
+    work_dir = habibi_pipe.CACHE_DIR / ("work_" + ts)
     work_dir.mkdir(parents=True, exist_ok=True)
 
     safe_ref_wav, safe_ref_text = habibi_pipe.prepare_safe_habibi_reference(speaker_meta["habibi_ref_wav"], "")
@@ -297,6 +297,9 @@ def run_zero_ui_pipeline(drive_root: str = "/content/drive/MyDrive", episode_id:
     s2_master_concat = []
     s2_scene_files: list[tuple[str, str]] = []
     pause_48k = np.zeros(int(0.50 * 48000), dtype=np.float32)
+
+    all_clean_segs = [str(p) for p in sorted(paths["clean_dir"].glob("omar_seg_*.wav"))]
+    ov_target_refs = all_clean_segs if all_clean_segs else speaker_meta["openvoice_ref_wav"]
 
     for idx, sc in enumerate(scenes, 1):
         name = sc["name"]
@@ -317,7 +320,7 @@ def run_zero_ui_pipeline(drive_root: str = "/content/drive/MyDrive", episode_id:
         )
         habibi_pipe.convert_s2_openvoice(
             s1_wav_path=s1_raw,
-            target_ref_wav_path=speaker_meta["openvoice_ref_wav"],
+            target_ref_wav_path=ov_target_refs,
             out_s2_wav=s2_raw,
             tau=0.3,
         )

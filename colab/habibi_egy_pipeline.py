@@ -1,28 +1,36 @@
 #!/usr/bin/env python3
-"""habibi_egy_pipeline.py — استوديو «رِواق» للعامية المصرية (Habibi-TTS Specialized/EGY + OpenVoice V2) v2.0
+"""habibi_egy_pipeline.py — استوديو «رِواق» للعامية المصرية (Habibi-TTS Specialized/EGY + OpenVoice V2) v2.1
 
-الإصلاحات الهندسية الكاملة في هذا الإصدار:
-  1) ترقيع torchaudio.load و torchaudio.save عبر soundfile لتفادي عطل TorchCodec في PyTorch/TorchAudio 2.9+ على Colab.
-  2) القص الذكي التلقائي للمقطع المرجعي إذا تجاوز 10 ثوانٍ (تجنباً لانفجار معادلة 22 - duration في Habibi-TTS عند رفع ملفات 17-25 ثانية مثل 03.wav و 04.wav).
-  3) تفريغ نصي تلقائي للمقطع المرجعي عبر Faster-Whisper (large-v3-turbo) إذا تُرك نص المرجع فارغاً، مع إضافة مسافة فاصلة إلزامية للنص العربي.
-  4) إصلاح عيب CA-02-D01 رسمياً: dialect_id=None مع أوزان Specialized/EGY (Apache-2.0 التجاري).
-  5) ترقيع OpenVoice V2 للعمل مع PyTorch الحديث (return_complex=True) و librosa >= 0.11.
-  6) اصطياد وعرض أي خطأ بوضوح بالعربية بدلاً من رسائل Error المبهمة في Gradio.
+متوافق 100% مع Google Colab 2026 (Python 3.13.15 + Ubuntu 24.04 + TorchAudio 2.9+):
+  1) ترقيع audioop تلقائياً لـ Python 3.13 (PEP 594) قبل استيراد f5_tts / pydub.
+  2) ترقيع torchaudio.load و torchaudio.save عبر soundfile لتفادي عطل TorchCodec.
+  3) تمرير مصفوفة صوت 16kHz مباشرة إلى Faster-Whisper لتفادي عطل PyAV (av.open) على Python 3.13.
+  4) القص الذكي التلقائي للمقطع المرجعي (≤ 9.2 ثانية) لحماية معادلة (22 - duration) في Habibi-TTS.
+  5) إصلاح عيب ToneColorConverter.__init__(enable_watermark) في OpenVoice V2 + دعم دمج كل مقاطع عمر النقية لبصمة أقوى.
+  6) إصلاح CA-02-D01 رسمياً: dialect_id=None مع أوزان Specialized/EGY (Apache-2.0 التجاري).
 """
 from __future__ import annotations
 
 import gc
 import hashlib
-import json
 import os
 import re
-import shutil
 import sys
 import traceback
-import zipfile
+import types
 from pathlib import Path
 import numpy as np
 import soundfile as sf
+
+# ── 0) حماية Python 3.13 (PEP 594): ضمان وجود audioop قبل استيراد pydub داخل f5_tts ──
+try:
+    import audioop  # noqa: F401
+except ImportError:
+    try:
+        import pyaudioop as _pyaudioop
+        sys.modules["audioop"] = _pyaudioop
+    except ImportError:
+        sys.modules["audioop"] = types.ModuleType("audioop")
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS_DIR = REPO_ROOT / "scripts"
@@ -43,11 +51,10 @@ os.environ.setdefault("HF_HOME", str(CACHE_DIR / "hf"))
 DEFAULT_BENCHMARK_TEXT = "إزيّك، أنا عمر. خلّينا نحكي الحكاية بهدوء، واحدة واحدة."
 
 _HABIBI_STATE = {"ema_model": None, "vocoder": None, "vocab_set": None}
-_OPENVOICE_STATE = {"converter": None}
+_OPENVOICE_STATE = {"converter": None, "tgt_se_cache": {}}
 _WHISPER_REF_CACHE: dict[str, tuple[str, str]] = {}
 
 
-# ── ترقيع شامل لـ torchaudio.load لتفادي عطل TorchCodec على Google Colab 2026 ──
 def patch_torchaudio_soundfile():
     import torch
     import torchaudio
@@ -57,7 +64,6 @@ def patch_torchaudio_soundfile():
 
     def _safe_ta_load(filepath, *args, **kwargs):
         data, sr = sf.read(str(filepath), dtype="float32", always_2d=True)
-        # soundfile يرجع (frames, channels)، بينما torchaudio يتوقع (channels, frames)
         tensor = torch.from_numpy(np.ascontiguousarray(data.T))
         return tensor, int(sr)
 
@@ -83,12 +89,8 @@ def set_deterministic_seed(seed: int = 42):
         torch.cuda.manual_seed_all(seed)
 
 
-# ── تجهيز وتفريغ المقطع المرجعي بأمان (≤ 9.5 ثانية) لـ Habibi-TTS ──────────────
 def prepare_safe_habibi_reference(ref_audio_path: str, ref_text: str = "") -> tuple[str, str]:
-    """
-    يضمن ألا يتجاوز المقطع المرجعي 9.5 ثانية (حيث إن نافذة Habibi/F5 الكلية 22 ثانية شاملة المرجع والتوليد)،
-    ويفرّغ نصه بدقة عبر Faster-Whisper إذا لم يُكتب نص المرجع يدوياً.
-    """
+    """يضمن ألا يتجاوز المرجع 9.2 ثانية ويفرّغ نصه بدقة عبر Faster-Whisper بدون PyAV."""
     cache_key = f"{os.path.abspath(ref_audio_path)}::{os.path.getsize(ref_audio_path)}::{(ref_text or '').strip()}"
     if cache_key in _WHISPER_REF_CACHE:
         return _WHISPER_REF_CACHE[cache_key]
@@ -104,17 +106,14 @@ def prepare_safe_habibi_reference(ref_audio_path: str, ref_text: str = "") -> tu
 
     was_trimmed = False
     if dur > 10.2:
-        # استخراج أنقى مقطع كلام طبيعي بطول 6–9.5 ثانية بدلاً من إرسال ملف 20+ ثانية يكسر المعادلة
         chunks = prepare_dataset.slice_on_pauses(x, sr=sr, min_sec=5.5, max_sec=9.2)
         if chunks:
-            best = max(chunks, key=lambda c: float(np.sqrt(np.mean(c ** 2))))
-            x = best
+            x = max(chunks, key=lambda c: float(np.sqrt(np.mean(c ** 2))))
         else:
             x = x[: int(9.0 * sr)]
         was_trimmed = True
         print(f"✂ تم قص المرجع تلقائياً من {dur:.1f}s إلى {len(x)/sr:.2f}s ليناسب نافذة Habibi-TTS القياسية.")
 
-    # معايرة آمنة للذروة
     mx = float(np.max(np.abs(x)))
     if mx > 0.005:
         x = (x / mx * 0.85).astype(np.float32)
@@ -125,25 +124,15 @@ def prepare_safe_habibi_reference(ref_audio_path: str, ref_text: str = "") -> tu
         print("📝 جاري استخراج النص الحرفي للمقطع المرجعي عبر Faster-Whisper لضمان مطابقة المخارج...")
         _, transcribed = transcribe_to_meta.transcribe_file(safe_wav, model_size="auto")
         final_ref_text = transcribed.strip()
-        # تحرير ذاكرة Whisper قبل تحميل Habibi-TTS
-        gc.collect()
-        try:
-            import torch
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-        except Exception:
-            pass
 
     if not final_ref_text:
         final_ref_text = "بسم الله الرحمن الرحيم، أهلاً بيكم في رواق."
 
-    # مهم جداً في Habibi-TTS مع الحروف العربية (2-byte UTF-8): إضافة مسافة فاصلة في نهاية نص المرجع!
     final_ref_text = final_ref_text.strip() + "  "
     _WHISPER_REF_CACHE[cache_key] = (safe_wav, final_ref_text)
     return safe_wav, final_ref_text
 
 
-# ── 1) محرك Habibi-TTS Specialized/EGY (Apache-2.0 · dialect_id=None) ────────
 def load_habibi_egy(device: str | None = None):
     patch_torchaudio_soundfile()
     import torch
@@ -185,7 +174,7 @@ def load_habibi_egy(device: str | None = None):
         vocab_file=vocab_path,
         device=device,
     )
-    vocoder = load_vocoder(vocoder_name="vocos", is_local=False, device=device)
+    vocoder = load_vocoder(vocoder_name="vocos", is_local=False, device=device, hf_cache_dir=str(CACHE_DIR / "hf"))
 
     _HABIBI_STATE.update({
         "ema_model": ema_model,
@@ -225,7 +214,6 @@ def synthesize_s1_habibi_egy(
     guard = check_text_no_dialect_tags_and_oov(gen_text, vocab_set)
     set_deterministic_seed(seed)
 
-    # تمرير المرجع المجهز مباشرة إلى infer_process مع dialect_id=None (إصلاح CA-02-D01)
     wav_arr, sr, _ = infer_process(
         safe_ref_wav,
         safe_ref_text,
@@ -260,12 +248,14 @@ def synthesize_s1_habibi_egy(
     }
 
 
-# ── 2) محرك OpenVoice V2 مع ترقيع التوافق الحديث ─────────────────────────────
 def _patch_openvoice_modern_pytorch_librosa():
     import librosa
     import torch
     import openvoice.mel_processing as mp
     import openvoice.api as ov_api
+
+    if getattr(ov_api, "_ruwaq_ov_patched", False):
+        return
 
     def _safe_spectrogram_torch(y, n_fft, sampling_rate, hop_size, win_size, center=False):
         dtype_device = f"{y.dtype}_{y.device}"
@@ -292,9 +282,75 @@ def _patch_openvoice_modern_pytorch_librosa():
     def _safe_mel_fn(sr, n_fft, n_mels, fmin, fmax):
         return librosa.filters.mel(sr=sr, n_fft=n_fft, n_mels=n_mels, fmin=fmin, fmax=fmax)
 
+    # إصلاح عيب upstream في ToneColorConverter.__init__ عند تمرير enable_watermark=False
+    def _safe_tcc_init(self, *args, **kwargs):
+        enable_wm = kwargs.pop("enable_watermark", False)
+        ov_api.OpenVoiceBaseClass.__init__(self, *args, **kwargs)
+        if enable_wm:
+            import wavmark
+            self.watermark_model = wavmark.load_model().to(self.device)
+        else:
+            self.watermark_model = None
+        self.version = getattr(self.hps, "_version_", "v2")
+
+    # استبدال librosa.load داخل OpenVoice بقارئ soundfile/scipy المباشر لتفادي audioread على Python 3.13
+    def _safe_extract_se(self, ref_wav_list, se_save_path=None):
+        if isinstance(ref_wav_list, (str, Path)):
+            ref_wav_list = [str(ref_wav_list)]
+        device = self.device
+        hps = self.hps
+        gs = []
+        for fname in ref_wav_list:
+            audio_ref = prepare_dataset.load_audio_mono_48k(str(fname), int(hps.data.sampling_rate))
+            y = torch.from_numpy(audio_ref).float().to(device).unsqueeze(0)
+            y = _safe_spectrogram_torch(
+                y,
+                hps.data.filter_length,
+                hps.data.sampling_rate,
+                hps.data.hop_length,
+                hps.data.win_length,
+                center=False,
+            ).to(device)
+            with torch.no_grad():
+                g = self.model.ref_enc(y.transpose(1, 2)).unsqueeze(-1)
+                gs.append(g.detach())
+        gs = torch.stack(gs).mean(0)
+        if se_save_path is not None:
+            os.makedirs(os.path.dirname(os.path.abspath(se_save_path)), exist_ok=True)
+            torch.save(gs.cpu(), se_save_path)
+        return gs
+
+    def _safe_convert(self, audio_src_path, src_se, tgt_se, output_path=None, tau=0.3, message="default"):
+        hps = self.hps
+        audio = prepare_dataset.load_audio_mono_48k(str(audio_src_path), int(hps.data.sampling_rate))
+        with torch.no_grad():
+            y = torch.from_numpy(audio).float().to(self.device).unsqueeze(0)
+            spec = _safe_spectrogram_torch(
+                y,
+                hps.data.filter_length,
+                hps.data.sampling_rate,
+                hps.data.hop_length,
+                hps.data.win_length,
+                center=False,
+            ).to(self.device)
+            spec_lengths = torch.LongTensor([spec.size(-1)]).to(self.device)
+            out_audio = (
+                self.model.voice_conversion(spec, spec_lengths, sid_src=src_se, sid_tgt=tgt_se, tau=tau)[0][0, 0]
+                .data.cpu()
+                .float()
+                .numpy()
+            )
+            if output_path is None:
+                return out_audio
+            sf.write(str(output_path), out_audio, int(hps.data.sampling_rate), subtype="PCM_16")
+
     mp.spectrogram_torch = _safe_spectrogram_torch
     mp.librosa_mel_fn = _safe_mel_fn
     ov_api.spectrogram_torch = _safe_spectrogram_torch
+    ov_api.ToneColorConverter.__init__ = _safe_tcc_init
+    ov_api.ToneColorConverter.extract_se = _safe_extract_se
+    ov_api.ToneColorConverter.convert = _safe_convert
+    ov_api._ruwaq_ov_patched = True
 
 
 def load_openvoice_v2(device: str | None = None):
@@ -333,13 +389,23 @@ def load_openvoice_v2(device: str | None = None):
 
 def convert_s2_openvoice(
     s1_wav_path: str,
-    target_ref_wav_path: str,
+    target_ref_wav_path: str | list[str],
     out_s2_wav: str,
     tau: float = 0.3,
 ) -> dict:
     converter, _ = load_openvoice_v2()
     src_se = converter.extract_se([s1_wav_path])
-    tgt_se = converter.extract_se([target_ref_wav_path])
+
+    if isinstance(target_ref_wav_path, (str, Path)):
+        ref_list = [str(target_ref_wav_path)]
+    else:
+        ref_list = [str(p) for p in target_ref_wav_path]
+
+    cache_key = "::".join(sorted(ref_list))
+    if cache_key not in _OPENVOICE_STATE["tgt_se_cache"]:
+        _OPENVOICE_STATE["tgt_se_cache"][cache_key] = converter.extract_se(ref_list)
+    tgt_se = _OPENVOICE_STATE["tgt_se_cache"][cache_key]
+
     os.makedirs(os.path.dirname(os.path.abspath(out_s2_wav)), exist_ok=True)
     converter.convert(
         audio_src_path=s1_wav_path,
@@ -354,6 +420,7 @@ def convert_s2_openvoice(
         "sr": int(sr),
         "duration_s": round(len(data) / sr, 3),
         "tau": float(tau),
+        "segments_averaged": len(ref_list),
     }
 
 
@@ -429,19 +496,12 @@ def run_ablation_test(
 def launch_habibi_gradio(share: bool = True):
     import gradio as gr
 
-    with gr.Blocks(title="Ruwaq Habibi-EGY + OpenVoice V2 Studio v2.0") as demo:
-        gr.Markdown(
-            "# 🎙️ مختبر «رِواق» للعامية المصرية (`Habibi-TTS Specialized/EGY` + `OpenVoice V2`) — الإصدار 2.0\n"
-            "**مُصحَّح من أعطال `TorchCodec` وطول المقطع المرجعي وعيب `CA-02-D01`!**"
-        )
+    with gr.Blocks(title="Ruwaq Habibi-EGY + OpenVoice V2 Studio v2.1") as demo:
+        gr.Markdown("# 🎙️ مختبر «رِواق» للعامية المصرية (`Habibi-TTS Specialized/EGY` + `OpenVoice V2`) — v2.1")
         with gr.Row():
-            ref7_in = gr.Audio(label="1️⃣ ارفع أي ملف صوتي بصوتك (حتى لو طويل — سيختار الكود أنقى 8 ثوانٍ منه تلقائياً!)", type="filepath")
+            ref7_in = gr.Audio(label="1️⃣ ارفع ملف صوتي بصوتك", type="filepath")
             ref10_in = gr.Audio(label="2️⃣ ملف مرجعي ثانٍ لـ OpenVoice (اختياري)", type="filepath")
-
-        ref_txt_in = gr.Textbox(
-            label="النص العربي للمرجع (اختياري — اتركه فارغاً وسيفرّغه Faster-Whisper تلقائياً!)",
-            lines=2,
-        )
+        ref_txt_in = gr.Textbox(label="النص العربي للمرجع (اختياري)", lines=2)
         gen_txt_in = gr.Textbox(label="النص المصري المراد نطقه بصوت عمر", lines=3, value=DEFAULT_BENCHMARK_TEXT)
         with gr.Row():
             seed_in = gr.Number(value=42, precision=0, label="Seed")
@@ -450,19 +510,16 @@ def launch_habibi_gradio(share: bool = True):
             spd_in = gr.Slider(0.8, 1.2, value=1.0, step=0.05, label="Speed")
             tau_in = gr.Slider(0.1, 0.8, value=0.3, step=0.05, label="OpenVoice tau")
             m_choice = gr.Radio(["S1", "S2"], value="S1", label="مصدر الماستر S3")
-
         btn_test = gr.Button("🚀 شغّل الاختبار المزدوج (S1 + S2 + S3 Master)", variant="primary")
         with gr.Row():
             s1_out = gr.Audio(label="S1: Habibi-TTS EGY الأصلي", type="filepath")
             s2_out = gr.Audio(label="S2: بعد OpenVoice V2", type="filepath")
             s3_out = gr.Audio(label="S3: ماستر استوديو رِواق (48kHz / -16 LUFS)", type="filepath")
         rep_md = gr.Markdown()
-
         btn_test.click(
             fn=run_ablation_test,
             inputs=[gen_txt_in, ref7_in, ref_txt_in, ref10_in, seed_in, nfe_in, cfg_in, spd_in, tau_in, m_choice],
             outputs=[s1_out, s2_out, s3_out, rep_md],
         )
-
     demo.launch(share=share, inline=True, debug=True)
     return demo

@@ -130,6 +130,9 @@ def group_words_to_riwaq_captions(
     return formatted
 
 
+_WHISPER_MODEL_CACHE: dict[tuple[str, str, str], object] = {}
+
+
 def transcribe_file(
     audio_path: str,
     model_size: str = "auto",
@@ -156,10 +159,19 @@ def transcribe_file(
     if model_size == "auto":
         model_size = "large-v3-turbo" if use_cuda else "small"
 
-    print(f"=== تفريغ Faster-Whisper ({model_size} · {chosen_device}/{compute_type}) ===")
-    model = WhisperModel(model_size, device=chosen_device, compute_type=compute_type)
+    cache_key = (model_size, chosen_device, compute_type)
+    if cache_key not in _WHISPER_MODEL_CACHE:
+        print(f"=== تحميل Faster-Whisper ({model_size} · {chosen_device}/{compute_type}) ===")
+        _WHISPER_MODEL_CACHE[cache_key] = WhisperModel(model_size, device=chosen_device, compute_type=compute_type)
+    model = _WHISPER_MODEL_CACHE[cache_key]
+
+    # قراءة الصوت كـ NumPy array بتردد 16kHz مباشرة لتفادي عطل PyAV (av.open) على Python 3.13 في Google Colab
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import prepare_dataset
+    audio_16k = prepare_dataset.load_audio_mono_48k(str(audio_path), 16000)
+
     segments, _ = model.transcribe(
-        audio_path,
+        audio_16k,
         language="ar",
         beam_size=5,
         vad_filter=True,
