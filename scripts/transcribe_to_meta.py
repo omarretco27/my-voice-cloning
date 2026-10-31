@@ -4,10 +4,12 @@
   - بحد أقصى سطران × 28 حرفاً عربياً (إجمالي ≤ 54 حرفاً للكابشن الواحد)
   - مدة بقاء الكابشن ≥ 1.25 ثانية (لتفادي فشل فحص qc.py)
   - إبراز تلقائي للأرقام والنسب وأهم كلمة مؤثرة (≤ كلمتين في keywords)
-  - دعم العمل على GPU في Google Colab (large-v3-turbo float16) أو CPU محلياً (small int8)
-  - تحديث تلقائي لملف episode_meta.json + توليد CAPTIONS_AR_<ID>.json و CAPTIONS_AR_<ID>.srt
+  - متوافق 100% مع Google Colab 2026 (Python 3.13 + CUDA 13):
+    * قراءة الصوت كـ NumPy array بتردد 16kHz مباشرة لتفادي عطل PyAV (av.open).
+    * فحص استباقي لمكتبة libcublas.so.12 مع تحوّل تلقائي فوري وآمن إلى CPU int8 عند غياب مكتبات CUDA 12.
 """
 import argparse
+import ctypes
 import json
 import os
 import re
@@ -22,6 +24,39 @@ AR_STOPWORDS = {
 }
 
 NUM_RE = re.compile(r"[0-9٠-٩]+[%٪]?")
+_WHISPER_MODEL_CACHE: dict[tuple[str, str, str], object] = {}
+
+
+def _can_ctranslate2_use_cuda12() -> bool:
+    """يتحقق مسبقاً من توفر مكتبة libcublas.so.12 التي يطلبها محرك CTranslate2 على كروت NVIDIA."""
+    try:
+        import torch
+        if not torch.cuda.is_available():
+            return False
+    except Exception:
+        return False
+
+    try:
+        ctypes.CDLL("libcublas.so.12")
+        return True
+    except OSError:
+        # البحث الاحتياطي في حال تثبيت حزم nvidia-cublas-cu12 داخل بايثون
+        search_roots = [Path(sys.prefix), Path("/usr/local")]
+        for root in search_roots:
+            if not root.exists():
+                continue
+            for cand in root.glob("**/libcublas.so.12*"):
+                try:
+                    ctypes.CDLL(str(cand), mode=ctypes.RTLD_GLOBAL)
+                    for cudnn_cand in root.glob("**/libcudnn*.so.9*"):
+                        try:
+                            ctypes.CDLL(str(cudnn_cand), mode=ctypes.RTLD_GLOBAL)
+                        except OSError:
+                            pass
+                    return True
+                except OSError:
+                    continue
+        return False
 
 
 def extract_keywords(text: str, max_kw: int = 2) -> list:
@@ -29,13 +64,11 @@ def extract_keywords(text: str, max_kw: int = 2) -> list:
     words = [w.strip("،.؟!«»\"'()[]…:") for w in text.split()]
     words = [w for w in words if w]
     kws = []
-    # الأولوية للأرقام والنسب المئوية (قاعدة إلزامية من brand.json)
     for w in words:
         if NUM_RE.search(w) and w not in kws:
             kws.append(w)
             if len(kws) >= max_kw:
                 return kws
-    # اختيار كلمة مفتاحية مؤثرة واحدة غير شائعة إن لم توجد أرقام
     candidates = [w for w in words if w not in AR_STOPWORDS and len(w) >= 4]
     if candidates and len(kws) < 1:
         best = max(candidates, key=len)
@@ -94,7 +127,6 @@ def group_words_to_riwaq_captions(
     if cur_words:
         raw_caps.append(cur_words)
 
-    # ضمان أن كل كابشن ≥ min_dur_s (لتمرير فحص qc.py بدون أي FAIL)
     formatted = []
     for idx, grp in enumerate(raw_caps):
         text = " ".join(x["word"] for x in grp).strip()
@@ -103,13 +135,11 @@ def group_words_to_riwaq_captions(
 
         if t_out - t_in < min_dur_s:
             desired_out = round(t_in + min_dur_s, 2)
-            # عدم التداخل مع بداية الكابشن التالي إن وُجد
             if idx + 1 < len(raw_caps):
                 next_in = round(raw_caps[idx + 1][0]["start"], 2)
                 if desired_out <= next_in - 0.04:
                     t_out = desired_out
                 elif formatted and (len(formatted[-1]["ar"]) + 1 + len(text) <= 55):
-                    # دمج الكابشن القصير مع السابق إذا كانت المسافة ضيقة
                     formatted[-1]["ar"] = f"{formatted[-1]['ar']} {text}".strip()
                     formatted[-1]["t_out"] = max(round(formatted[-1]["t_in"] + min_dur_s, 2), t_out)
                     formatted[-1]["keywords"] = extract_keywords(formatted[-1]["ar"])
@@ -130,7 +160,35 @@ def group_words_to_riwaq_captions(
     return formatted
 
 
-_WHISPER_MODEL_CACHE: dict[tuple[str, str, str], object] = {}
+def _run_whisper_once(
+    audio_16k,
+    model_size: str,
+    chosen_device: str,
+    compute_type: str,
+    initial_prompt: str,
+) -> list:
+    from faster_whisper import WhisperModel
+
+    cache_key = (model_size, chosen_device, compute_type)
+    if cache_key not in _WHISPER_MODEL_CACHE:
+        print(f"=== تحميل Faster-Whisper ({model_size} · {chosen_device}/{compute_type}) ===")
+        _WHISPER_MODEL_CACHE[cache_key] = WhisperModel(
+            model_size,
+            device=chosen_device,
+            compute_type=compute_type,
+        )
+    model = _WHISPER_MODEL_CACHE[cache_key]
+    segments_gen, _ = model.transcribe(
+        audio_16k,
+        language="ar",
+        beam_size=5,
+        vad_filter=True,
+        vad_parameters={"min_silence_duration_ms": 250},
+        word_timestamps=True,
+        initial_prompt=initial_prompt,
+    )
+    # تحويل المولد (generator) إلى قائمة داخل نفس النطاق لاصطياد أي خطأ مكتبات ديناميكية مثل libcublas.so.12 فوراً
+    return list(segments_gen)
 
 
 def transcribe_file(
@@ -140,45 +198,33 @@ def transcribe_file(
     initial_prompt: str = "بسم الله، أهلاً بيكم في رِواق. حكاية النهارده بالعامية المصرية والعربية الواضحة، مع الترقيم السليم.",
 ) -> tuple[list, str]:
     try:
-        from faster_whisper import WhisperModel
+        import faster_whisper  # noqa: F401
     except ImportError as exc:
         raise RuntimeError("حزمة faster-whisper غير مثبتة. ثبّتها بالأمر: pip install faster-whisper") from exc
 
-    use_cuda = False
-    if device == "auto":
-        try:
-            import torch
-            use_cuda = torch.cuda.is_available()
-        except ImportError:
-            use_cuda = False
-    else:
-        use_cuda = device == "cuda"
-
-    chosen_device = "cuda" if use_cuda else "cpu"
-    compute_type = "float16" if use_cuda else "int8"
-    if model_size == "auto":
-        model_size = "large-v3-turbo" if use_cuda else "small"
-
-    cache_key = (model_size, chosen_device, compute_type)
-    if cache_key not in _WHISPER_MODEL_CACHE:
-        print(f"=== تحميل Faster-Whisper ({model_size} · {chosen_device}/{compute_type}) ===")
-        _WHISPER_MODEL_CACHE[cache_key] = WhisperModel(model_size, device=chosen_device, compute_type=compute_type)
-    model = _WHISPER_MODEL_CACHE[cache_key]
-
-    # قراءة الصوت كـ NumPy array بتردد 16kHz مباشرة لتفادي عطل PyAV (av.open) على Python 3.13 في Google Colab
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     import prepare_dataset
     audio_16k = prepare_dataset.load_audio_mono_48k(str(audio_path), 16000)
 
-    segments, _ = model.transcribe(
-        audio_16k,
-        language="ar",
-        beam_size=5,
-        vad_filter=True,
-        vad_parameters={"min_silence_duration_ms": 250},
-        word_timestamps=True,
-        initial_prompt=initial_prompt,
-    )
+    if device == "auto":
+        use_cuda = _can_ctranslate2_use_cuda12()
+    else:
+        use_cuda = (device == "cuda") and _can_ctranslate2_use_cuda12()
+
+    chosen_device = "cuda" if use_cuda else "cpu"
+    compute_type = "float16" if use_cuda else "int8"
+    if model_size == "auto":
+        # large-v3-turbo سريع جداً حتى على CPU int8 (4 طبقات فك ترميز فقط!) ودقيق جداً في العامية المصرية
+        model_size = "large-v3-turbo"
+
+    try:
+        segments = _run_whisper_once(audio_16k, model_size, chosen_device, compute_type, initial_prompt)
+    except Exception as exc:
+        if chosen_device != "cpu":
+            print(f"ℹ️ تعذّر تشغيل CTranslate2 على CUDA ({exc}) — التحوّل التلقائي الآمن إلى CPU int8...")
+            segments = _run_whisper_once(audio_16k, model_size, "cpu", "int8", initial_prompt)
+        else:
+            raise
 
     words = []
     full_text = []
@@ -201,9 +247,6 @@ def run_episode_transcription(
     meta_path: str | None = None,
     model_size: str = "auto",
 ) -> dict:
-    """
-    vo_entries: قائمة من القواميس مثل [{"path": ".../vo_01.wav", "t_in": 0.2}, ...]
-    """
     all_words = []
     all_caps = []
     os.makedirs(out_dir, exist_ok=True)
@@ -236,7 +279,6 @@ def run_episode_transcription(
             json.dump(meta, mf, ensure_ascii=False, indent=2)
         print(f"✔ تم تحديث كابشنز الحلقة تلقائياً في: {meta_path}")
 
-        # توليد ملفات SRT المعتمدة تلقائياً
         sys.path.insert(0, str(Path(__file__).resolve().parent))
         import make_srt
         make_srt.build(meta_path, out_dir)
@@ -252,7 +294,7 @@ def main():
     parser.add_argument("--out-dir", default="outputs", help="مجلد حفظ ملفات SRT و JSON")
     parser.add_argument("--offset", type=float, default=0.0, help="إزاحة البداية بالثواني عند تمرير ملف صوتي مفرد")
     parser.add_argument("--project-id", default="EPISODE", help="معرف المشروع عند عدم تمرير --meta")
-    parser.add_argument("--model", default="auto", help="حجم موديل Whisper (الافتراضي auto: large-v3-turbo على GPU)")
+    parser.add_argument("--model", default="auto", help="حجم موديل Whisper (الافتراضي auto)")
     args = parser.parse_args()
 
     if args.meta:
