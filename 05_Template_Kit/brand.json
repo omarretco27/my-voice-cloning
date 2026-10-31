@@ -1,0 +1,658 @@
+{
+  "schema_version": "1.0",
+  "brand_id": "riwaq",
+  "name_ar": "رِواق",
+  "tagline_ar": "تَارِيخْ وَتُرَاث",
+  "source_of_truth": "Riwaq Production Brand Kit (93 files) — extracted values only, no invention",
+  "theme": {
+    "colors": {
+      "ink_deep": {
+        "hex": "#1C1B19",
+        "role": "background_primary",
+        "max_ratio": 0.7
+      },
+      "ink_second": {
+        "hex": "#242218",
+        "role": "surface_cards",
+        "max_ratio": 0.1
+      },
+      "parchment": {
+        "hex": "#F3EBDB",
+        "role": "primary_text_on_dark",
+        "max_ratio": 0.25
+      },
+      "parchment2": {
+        "hex": "#EDE6D6",
+        "role": "paper_backgrounds",
+        "max_ratio": 0.2
+      },
+      "gold": {
+        "hex": "#A98A4B",
+        "role": "headlines_rules",
+        "max_ratio": 0.08
+      },
+      "gold_light": {
+        "hex": "#C2A469",
+        "role": "accents_jewel_dot",
+        "max_ratio": 0.02
+      },
+      "gold_pale": {
+        "hex": "#EFE6D2",
+        "role": "warm_highlights",
+        "max_ratio": 0.05
+      },
+      "burgundy": {
+        "hex": "#5E2230",
+        "role": "rare_alert_transition",
+        "max_ratio": 0.05
+      },
+      "stone": {
+        "hex": "#8A7F6B",
+        "role": "secondary_text_sources",
+        "max_ratio": 0.05
+      },
+      "stone_light": {
+        "hex": "#B9AE94",
+        "role": "dividers_dots",
+        "max_ratio": 0.02
+      }
+    },
+    "fonts": {
+      "headline": {
+        "family": "Amiri",
+        "weights": [
+          400,
+          700
+        ],
+        "use": [
+          "titles",
+          "quotes",
+          "big_numbers",
+          "end_screen"
+        ],
+        "notes": "سطران كحد أقصى للعنوان"
+      },
+      "body": {
+        "family": "IBM Plex Sans Arabic",
+        "weights": [
+          400,
+          500,
+          700
+        ],
+        "use": [
+          "captions",
+          "lower_thirds",
+          "sources",
+          "cta",
+          "meta"
+        ]
+      },
+      "forbidden": [
+        "Cairo",
+        "Inter",
+        "system-ui as design choice"
+      ]
+    },
+    "type_scale_1080x1920": {
+      "hook_title": {
+        "font": "Amiri",
+        "px": 92,
+        "weight": 700,
+        "max_lines": 2
+      },
+      "chapter_title": {
+        "font": "Amiri",
+        "px": 78,
+        "weight": 700
+      },
+      "caption": {
+        "font": "Plex Arabic",
+        "px": 56,
+        "weight": 700,
+        "max_lines": 2,
+        "max_chars_ar": 28
+      },
+      "caption_keyword": {
+        "font": "Plex Arabic",
+        "color": "gold_light",
+        "max_words": 2
+      },
+      "lower_third_name": {
+        "font": "Plex Arabic",
+        "px": 40,
+        "weight": 700
+      },
+      "lower_third_role": {
+        "font": "Plex Arabic",
+        "px": 30,
+        "weight": 400,
+        "color": "stone"
+      },
+      "source_card": {
+        "font": "Plex Arabic",
+        "px": 29,
+        "weight": 500,
+        "min_duration_s": 2.5
+      },
+      "quote": {
+        "font": "Amiri",
+        "px": 66,
+        "weight": 400
+      },
+      "stat_number": {
+        "font": "Amiri",
+        "px": 170,
+        "weight": 700
+      },
+      "min_legible_px": 28
+    },
+    "logo": {
+      "symbol": "assets/riwaq-icon-gold.svg",
+      "lockup_horizontal": {
+        "light": "assets/riwaq-horizontal-light.svg",
+        "dark": "assets/riwaq-horizontal-dark.svg"
+      },
+      "lockup_stacked": {
+        "light": "assets/riwaq-stacked-light.svg",
+        "dark": "assets/riwaq-stacked-dark.svg"
+      },
+      "max_width_px": 130,
+      "clear_space": "نصف ارتفاع القوس من كل جهة",
+      "rules": [
+        "لا تدرجات",
+        "لا ظلال",
+        "لا 3D",
+        "لا إعادة كتابة للنص",
+        "نقطة ذهبية بلون gold_light"
+      ]
+    },
+    "watermark": {
+      "asset": "assets/riwaq-watermark-gold.svg",
+      "opacity": 0.8,
+      "position": "top-center",
+      "size_px": 72,
+      "animated": false
+    },
+    "look": {
+      "paper_texture": {
+        "enabled": true,
+        "blend": "soft-light",
+        "opacity": 0.1
+      },
+      "grain": 0.12,
+      "vignette": 0.18,
+      "bloom": 0.1,
+      "palette_lock": true,
+      "notes": "تحرير سينمائي هادئ: مساحة سالبة واسعة + إطار ذهبي رفيع + نسيج ورق خفيف"
+    },
+    "motion": {
+      "ease": "cubic-bezier(.2,.8,.2,1)",
+      "text_in_ms": 380,
+      "text_out_ms": 280,
+      "rise_px": 12,
+      "ken_burns": {
+        "from": 1.0,
+        "to": 1.06
+      },
+      "cut_rhythm_s": {
+        "default": [
+          3.5,
+          6.0
+        ],
+        "hook": [
+          1.5,
+          2.5
+        ]
+      },
+      "hold_after_motion_s": 1.0,
+      "max_speaker_zoom": 1.1,
+      "transitions": [
+        "hard_cut",
+        "fade_black_200ms"
+      ],
+      "forbidden": [
+        "flash",
+        "whip",
+        "spin",
+        "bounce",
+        "zoom_punch"
+      ]
+    },
+    "safe_zones": {
+      "9x16_1080x1920": {
+        "top_px": 220,
+        "bottom_px": 480,
+        "side_px": 64,
+        "caption_band_y": [
+          1210,
+          1360
+        ]
+      },
+      "16x9_1920x1080": {
+        "top_px": 80,
+        "bottom_px": 120,
+        "side_px": 90,
+        "caption_band_y": [
+          880,
+          980
+        ]
+      },
+      "1x1_1080x1080": {
+        "top_px": 120,
+        "bottom_px": 160,
+        "side_px": 80,
+        "caption_band_y": [
+          820,
+          910
+        ]
+      },
+      "4x5_1080x1350": {
+        "top_px": 160,
+        "bottom_px": 260,
+        "side_px": 72,
+        "caption_band_y": [
+          1010,
+          1130
+        ]
+      },
+      "center_critical_ratio": 0.6
+    },
+    "negative_rules": [
+      "لا لون خارج اللوحة الرسمية",
+      "لا تدرجات أو ظلال ثقيلة أو تأثيرات 3D على الشعار/النصوص",
+      "لا وميض أو تغيّر إضاءة حاد",
+      "لا كابشن يغطي الوجه أو كارت المصدر",
+      "لا موسيقى صاخبة أو مؤثرات جاهزة",
+      "لا صوت طبقة المسودة في أي تسليم",
+      "لا نص إنجليزي خارج شاشة النهاية"
+    ],
+    "captions": {
+      "styles": [
+        "clean_bottom",
+        "keyword_highlight",
+        "bilingual_stack"
+      ],
+      "ar": "المعنى الكامل + إبراز الكلمات المثرة فقط (ذهبي) — الأرقام تُبرز دائمًا",
+      "en": {
+        "position": "below_ar",
+        "scale": 0.6,
+        "font": "Plex Arabic Regular"
+      },
+      "rules": {
+        "keywords_max_words": 3,
+        "never_cover_face": true,
+        "highlight_numbers": true,
+        "max_lines": 2,
+        "max_chars_ar": 28
+      }
+    }
+  },
+  "sound": {
+    "mix_targets": {
+      "youtube_vod": {
+        "lufs": -14,
+        "true_peak_db": -1.0,
+        "vo_lufs": -16,
+        "duck_db": -12
+      },
+      "vertical_social": {
+        "lufs": -14,
+        "true_peak_db": -1.0,
+        "vo_lufs": -15,
+        "duck_db": -12
+      },
+      "podcast": {
+        "lufs": -16,
+        "true_peak_db": -1.0,
+        "vo_lufs": -18,
+        "duck_db": -10
+      }
+    },
+    "music_moods": [
+      "dark-tension",
+      "warm-story"
+    ],
+    "mood_change_points": [
+      "chapter_cards_only"
+    ],
+    "sfx_pack": {
+      "id": "riwaq_soft_v1",
+      "source": "08_Audio_Pack/sfx/",
+      "items": {
+        "whoosh": "SFX_whoosh.wav",
+        "riser": "SFX_riser_3s.wav",
+        "impact": "SFX_impact_soft.wav",
+        "page_turn": "SFX_page_turn.wav",
+        "ui_tick": "SFX_ui_tick.wav",
+        "shimmer": "SFX_shimmer_2s.wav"
+      },
+      "usage_rule": "مؤثرات ناعمة فقط — ممنوع أي مؤثر جاهز صاخب"
+    },
+    "sonic_logo": {
+      "status": "delivered_v2_premium",
+      "files": {
+        "primary": "08_Audio_Pack/sonic_logo_v2/SONIC_LOGO_v2A_mihrab_5s4.wav",
+        "social": "08_Audio_Pack/sonic_logo_v2/SONIC_LOGO_v2B_pulse_4s6.wav",
+        "short": "08_Audio_Pack/sonic_logo_v2/SONIC_LOGO_v2_short_1s6.wav",
+        "legacy_v1_long": "08_Audio_Pack/SONIC_LOGO_riwaq_4s.wav",
+        "legacy_v1_short": "08_Audio_Pack/SONIC_LOGO_riwaq_short_1s5.wav"
+      },
+      "engine": "Karplus-Strong oud + D2 drone + ney breath + frame drum + shimmer + stereo IR hall",
+      "structure": "حجاز على D: C#5 → Bb4 → A4 (+E4 خامسة جوفاء) — الضربة الحاسمة مع جوهرة القوس",
+      "quality": {
+        "peak_dbtp": -1.0,
+        "format": "stereo 48kHz PCM16",
+        "rights": "original_work_no_third_party"
+      },
+      "usage": {
+        "open": "primary",
+        "chapter_transition": "short",
+        "close": "primary"
+      },
+      "legacy_note": "النسخة v1 محفوظة للأرشيف والاستخدام البديل (بناء بسيط: 3 نغمات + ضربة) — تعمل بجانب v2 بلا تعارض"
+    },
+    "voice_profiles_file": "voice_profiles.json",
+    "music_moods_assets": {
+      "dark-tension": "08_Audio_Pack/music/MUSIC_dark-tension_bed_42s.wav",
+      "warm-story": "08_Audio_Pack/music/MUSIC_warm-story_bed_42s.wav",
+      "status": "placeholder_loopable_beds_synthesized_royalty_free",
+      "replacement_policy": "تُستبدل بمكتبة مرخّصة عند توفرها — نفس المواصفة (BPM/آلات/مزاج)"
+    },
+    "performance_by_context": {
+      "mystery": {
+        "pace": 1.05,
+        "pitch": "-2%",
+        "pause_after_ms": 350
+      },
+      "awe": {
+        "pace": 0.95,
+        "pitch": "+0%",
+        "pause_after_ms": 500
+      },
+      "tension": {
+        "pace": 1.08,
+        "pitch": "-1%",
+        "pause_after_ms": 250
+      },
+      "punchline": {
+        "pace": 1.1,
+        "pitch": "+2%",
+        "pause_after_ms": 600
+      },
+      "relief": {
+        "pace": 0.96,
+        "pitch": "+1%",
+        "pause_after_ms": 300
+      }
+    },
+    "voice_finish_chain": {
+      "script": "10_System/scripts/voice_finish.py",
+      "steps": [
+        "HPF70",
+        "body +2.2dB@250Hz",
+        "presence +1.5dB@1.8k",
+        "de-harsh -2.8dB@4.2k",
+        "air-trim -1.5dB@9k",
+        "silence-compress (300→190ms)",
+        "soft comp 2:1",
+        "subtle room 5%",
+        "LUFS -16 iterative",
+        "TP limit -1.0dB"
+      ],
+      "verified_against_reference": {
+        "metric": "spectral_centroid",
+        "reference_hz": 380,
+        "output_hz": [
+          365,
+          414
+        ]
+      },
+      "status": "validated"
+    },
+    "voice_identity": {
+      "status": "locked_2026-10-07",
+      "operational": {
+        "pipeline": "voice-01 → voice_finish.py",
+        "ear_test": "approved",
+        "files": [
+          "08_Audio_Pack/voice_operational_final/OPERATIONAL_01_brand.wav",
+          "08_Audio_Pack/voice_operational_final/OPERATIONAL_02_hook.wav",
+          "08_Audio_Pack/voice_operational_final/OPERATIONAL_03_closing.wav"
+        ]
+      },
+      "published": {
+        "pipeline": "الصوت الرسمي المستنسخ → نفس سلسلة الاستوديو",
+        "note": "المطابقة الطبيعية تحدث في مرحلة التوليد — لا تُعالَج بإزاحة نغمة"
+      },
+      "rejected": {
+        "pitch_shift": "مرفوض سمعيًا (تشويش طوري)",
+        "archive": "08_Audio_Pack/_rejected_pitchmatch/"
+      },
+      "rule": "الأذن تتقدم على المقاييس — أي تعديل صوتي يمر باختبار استماع إلزامي"
+    }
+  },
+  "versions": {
+    "theme": "1.4.0",
+    "stingers": "pending",
+    "voice_pack": "1.1.0",
+    "fonts": "1.0.0",
+    "kit": "1.0.0"
+  },
+  "provenance": {
+    "brand_kit_drive_folder": "1fPgA2xygMh-vpunog8jDwbTfZ04Jhq1N",
+    "font_sources": {
+      "Amiri": "aliftype/amiri (OFL)",
+      "IBMPlexSansArabic": "IBM (OFL)"
+    },
+    "extracted_on": "2026-10-07"
+  },
+  "project_spec": {
+    "brand_name_ar": "رِواق",
+    "brand_tagline_ar": "تَارِيخْ وَتُرَاث",
+    "monthly_volume": 12,
+    "platforms": [
+      "youtube",
+      "youtube_shorts",
+      "tiktok",
+      "reels"
+    ],
+    "languages": {
+      "primary": "ar-EG",
+      "secondary": "en",
+      "caption_mode": "bilingual_ar_over_en"
+    },
+    "video_types": [
+      "short",
+      "documentary",
+      "explainer",
+      "podcast_clip",
+      "promo",
+      "product"
+    ],
+    "aspect_ratios": {
+      "primary": "9x16",
+      "secondary": "16x9"
+    },
+    "brand_personality": [
+      "حيوي/شبابي",
+      "تقني/دقيق",
+      "فخم/Luxury"
+    ],
+    "visual_style": "نظيف ومينيمال (نظام الحزمة: مساحة سالبة + إطار ذهبي رفيع + نسيج ورق خفيف)",
+    "execution_mode": {
+      "agent": "autonomous_end_to_end",
+      "checkpoint": "rough_review_recommended",
+      "priority": "balanced_by_video_type"
+    },
+    "reference_channels": [
+      "ArabianAiSchool",
+      "Dupamicaffeine",
+      "DroosOnline4u"
+    ],
+    "voice_references": [
+      "الدحيح (إيقاع وأداء)",
+      "دوباميكافين (طاقة الطرح)"
+    ],
+    "directing_references": {
+      "marvel": "لغة كادر وحركة مشهدية — للأفلام الوثائقية",
+      "tom_and_jerry": "توقيت موسيقي وكوميدي — للشورتس"
+    }
+  },
+  "platform_seo_rules": {
+    "youtube": {
+      "title_chars": [
+        45,
+        65
+      ],
+      "no_misleading_metadata": true,
+      "no_excessive_caps": true,
+      "thumbnail_text_max_words": 5,
+      "no_watermarks_from_other_platforms": true
+    },
+    "youtube_shorts": {
+      "safe_zone": "9x16_1080x1920",
+      "no_intro_filler_first_1s": true,
+      "loop_friendly_ending": true
+    },
+    "tiktok": {
+      "no_external_watermarks": true,
+      "no_logo_collage": true,
+      "frontload_value_first_2s": true
+    },
+    "reels": {
+      "no_visible_watermarks": true,
+      "caption_safe_band_only": true,
+      "text_ratio_max": 0.25
+    },
+    "global": [
+      "لا موسيقى/صوت محمي بحقوق",
+      "كل مصدر مذكور في SOURCES قبل النشر",
+      "لا وعود طبية/مالية/دينية قاطعة",
+      "الترجمة الإنجليزية مراجعة بشريًا قبل النشر"
+    ]
+  },
+  "video_type_presets": {
+    "short": {
+      "cut_rhythm_s": [
+        1.5,
+        2.5
+      ],
+      "motion_energy": "high_controlled",
+      "captions": "keyword_highlight",
+      "music": "dark-tension",
+      "broll_ratio_max": 0.85,
+      "type_scale": "hook_heavy",
+      "duration_target_s": [
+        30,
+        60
+      ]
+    },
+    "documentary": {
+      "cut_rhythm_s": [
+        3.5,
+        6.0
+      ],
+      "motion_energy": "calm_cinematic",
+      "captions": "clean_bottom",
+      "music": "warm-story",
+      "broll_ratio_max": 0.7,
+      "type_scale": "standard",
+      "duration_target_s": [
+        300,
+        900
+      ]
+    },
+    "explainer": {
+      "cut_rhythm_s": [
+        2.0,
+        3.0
+      ],
+      "motion_energy": "medium",
+      "captions": "keyword_highlight",
+      "music": "warm-story",
+      "broll_ratio_max": 0.6,
+      "type_scale": "standard",
+      "duration_target_s": [
+        180,
+        600
+      ]
+    },
+    "podcast_clip": {
+      "cut_rhythm_s": [
+        4.0,
+        7.0
+      ],
+      "motion_energy": "low",
+      "captions": "bilingual_stack",
+      "music": "none_or_low_dark",
+      "broll_ratio_max": 0.4,
+      "type_scale": "caption_forward",
+      "duration_target_s": [
+        45,
+        120
+      ]
+    },
+    "promo": {
+      "cut_rhythm_s": [
+        1.0,
+        2.0
+      ],
+      "motion_energy": "high_controlled",
+      "captions": "keyword_highlight",
+      "music": "dark-tension",
+      "broll_ratio_max": 0.9,
+      "type_scale": "hook_heavy",
+      "duration_target_s": [
+        15,
+        45
+      ]
+    },
+    "product": {
+      "cut_rhythm_s": [
+        2.5,
+        4.0
+      ],
+      "motion_energy": "medium",
+      "captions": "clean_bottom",
+      "music": "warm-story",
+      "broll_ratio_max": 0.5,
+      "type_scale": "standard",
+      "duration_target_s": [
+        30,
+        120
+      ]
+    }
+  },
+  "render_strategy": {
+    "machine_profile": {
+      "os": "Windows",
+      "cpu": "i7",
+      "ram_gb": 8,
+      "vram_gb": 2,
+      "ssd_gb": 256,
+      "archive_hdd_tb": 1
+    },
+    "local_render": {
+      "resolution": "1080x1920/1920x1080",
+      "concurrency": 1,
+      "gl": "swiftshader",
+      "image_format": "jpeg_q90",
+      "chunked_render": "تقطيع الريندر إلى مقاطع ≤ 10 دقائق ثم دمج بـ ffmpeg",
+      "audio": "ريندر فيديو فقط ثم مكس الصوت بـ ffmpeg (توفير ذاكرة)",
+      "proxy_editing": "بروكسي 540p للمعاينة"
+    },
+    "cloud_render": {
+      "enabled": true,
+      "channel": "GitHub Actions (storage يشمل GitHub) — 1080p/60 بلا سقف جهاز محلي"
+    },
+    "source_media": {
+      "over_100mb": "بروكسي 720p H.264 ≤ 90MB قبل الرفع/المعالجة"
+    },
+    "whisper": {
+      "local": "faster-whisper small · int8 · VAD على دفعات",
+      "alternative": "Google Colab GPU (مجاني) للحلقات الطويلة",
+      "output": "JSON كلمة-بكلمة + SRT"
+    },
+    "storage_policy": "إعادة استخدام STORAGE_POLICY المرفقة + HDD الخارجي للأرشيف — مساحة العمل تبقى < 80MB"
+  }
+}

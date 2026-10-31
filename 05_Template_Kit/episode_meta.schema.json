@@ -1,0 +1,592 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://riwaq.system/schemas/episode_meta.schema.json",
+  "title": "Episode Meta — قالب عام لأي فيديو (أي براند، أي منصة)",
+  "description": "مصدر الحقيقة الوحيد لبناء أي فيديو. القالب (Engine) يقرأ هذا الملف فقط ولا يحتوي أي قيمة تصميمية.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "project",
+    "brand_ref",
+    "deliverables"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "2.0"
+    },
+    "brand_ref": {
+      "type": "object",
+      "description": "مرجع الثيم. المحرّك لا يعرف أي براند بالاسم — يعرف فقط أنه يقرأ theme.",
+      "required": [
+        "theme_path"
+      ],
+      "properties": {
+        "theme_path": {
+          "type": "string",
+          "examples": [
+            "themes/riwaq/brand.json"
+          ]
+        },
+        "overrides_path": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "تعديلات خاصة بالحلقة على الثيم (نادرة، وتُوثَّق)"
+        },
+        "watermark": {
+          "enum": [
+            "on",
+            "off"
+          ],
+          "default": "on"
+        }
+      }
+    },
+    "project": {
+      "type": "object",
+      "required": [
+        "id",
+        "title",
+        "video_type",
+        "platforms",
+        "aspect_ratios",
+        "language_primary"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{2,24}$",
+          "examples": [
+            "D04",
+            "EP12",
+            "RIW_005"
+          ]
+        },
+        "series_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "examples": [
+            "riwaq_heritage_s01"
+          ]
+        },
+        "title": {
+          "type": "string"
+        },
+        "episode_number": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "video_type": {
+          "enum": [
+            "short",
+            "explainer",
+            "documentary",
+            "podcast_clip",
+            "promo",
+            "product",
+            "story",
+            "news"
+          ]
+        },
+        "platforms": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "youtube",
+              "youtube_shorts",
+              "tiktok",
+              "reels",
+              "instagram_feed",
+              "facebook",
+              "linkedin",
+              "x",
+              "snapchat",
+              "podcast"
+            ]
+          }
+        },
+        "aspect_ratios": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "9x16",
+              "16x9",
+              "1x1",
+              "4x5"
+            ]
+          }
+        },
+        "language_primary": {
+          "type": "string",
+          "examples": [
+            "ar",
+            "ar-EG",
+            "en"
+          ]
+        },
+        "language_secondary": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "due_date": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date"
+        },
+        "priority": {
+          "enum": [
+            "speed",
+            "quality",
+            "balanced"
+          ],
+          "default": "balanced"
+        }
+      }
+    },
+    "source": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "description": "إن كان الفيديو مبنيًا على مادة مصدر (يوتيوب/بودكاست/أرشيف).",
+      "properties": {
+        "type": {
+          "enum": [
+            "original_footage",
+            "youtube",
+            "podcast",
+            "archive",
+            "stock",
+            "screen_recording",
+            "none"
+          ]
+        },
+        "url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "local_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "time_range": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "properties": {
+            "start": {
+              "type": "string"
+            },
+            "end": {
+              "type": "string"
+            }
+          }
+        },
+        "locator_quote": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "rights": {
+          "enum": [
+            "owned",
+            "licensed",
+            "fair_use_commentary",
+            "public_domain",
+            "permission_pending"
+          ]
+        },
+        "provenance_note": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "story": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "properties": {
+        "hook": {
+          "type": "string",
+          "maxLength": 140
+        },
+        "chapters": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "title": {
+                "type": "string"
+              },
+              "t_in": {
+                "type": "number"
+              },
+              "t_out": {
+                "type": "number"
+              }
+            }
+          }
+        },
+        "cta_question": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "next_tease": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "narration": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "properties": {
+        "mode": {
+          "enum": [
+            "generate",
+            "provided",
+            "none"
+          ]
+        },
+        "script_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "profile_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "من voice_profiles.json — لا يكتب صوتًا بالاسم هنا"
+        },
+        "replacement_policy": {
+          "enum": [
+            "must_match_official",
+            "drafts_allowed"
+          ],
+          "default": "must_match_official"
+        },
+        "placement_map": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "t_in",
+              "t_out",
+              "type"
+            ],
+            "properties": {
+              "t_in": {
+                "type": "number"
+              },
+              "t_out": {
+                "type": "number"
+              },
+              "type": {
+                "enum": [
+                  "vo_hook",
+                  "vo_value",
+                  "vo_cta",
+                  "original_proof",
+                  "broll_silent",
+                  "music_only"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "captions": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "properties": {
+        "styles": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "clean_bottom",
+              "keyword_highlight",
+              "bilingual_stack",
+              "none"
+            ]
+          }
+        },
+        "languages": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "ar",
+              "en"
+            ]
+          }
+        },
+        "sync_source": {
+          "enum": [
+            "provided_srt",
+            "asr_word_level",
+            "from_script"
+          ]
+        },
+        "safe_zone_ref": {
+          "type": "string",
+          "default": "brand.theme.safe_zones"
+        },
+        "rules": {
+          "type": "object",
+          "properties": {
+            "max_lines": {
+              "type": "integer",
+              "default": 2
+            },
+            "max_chars_ar": {
+              "type": "integer",
+              "default": 28
+            },
+            "keyword_color": {
+              "type": "string",
+              "default": "gold_light"
+            },
+            "never_cover_face": {
+              "const": true
+            }
+          }
+        }
+      }
+    },
+    "edit": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "properties": {
+        "fps": {
+          "enum": [
+            24,
+            25,
+            30,
+            50,
+            60
+          ],
+          "default": 30
+        },
+        "cut_style": {
+          "enum": [
+            "calm",
+            "medium",
+            "fast"
+          ]
+        },
+        "cut_rhythm_s": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          },
+          "description": "[min,max] — تُتجاوز قواعد الثيم فقط في الهوك"
+        },
+        "broll_ratio_max": {
+          "type": "number",
+          "maximum": 1
+        },
+        "motion_overrides": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "description": "نادر — أي تجاوز لقواعد الثيم يُسجَّل"
+        },
+        "music_mood": {
+          "enum": [
+            "dark-tension",
+            "warm-story",
+            "none"
+          ]
+        },
+        "stingers": {
+          "type": "object",
+          "properties": {
+            "in": {
+              "type": "boolean"
+            },
+            "out": {
+              "type": "boolean"
+            }
+          }
+        }
+      }
+    },
+    "render": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "properties": {
+        "resolution": {
+          "type": "array",
+          "items": {
+            "type": "integer"
+          }
+        },
+        "audio_target_ref": {
+          "type": "string",
+          "default": "brand.sound.mix_targets"
+        },
+        "per_platform_export": {
+          "type": "boolean",
+          "default": true
+        },
+        "proxy_mode": {
+          "type": "boolean",
+          "default": false
+        },
+        "preset": {
+          "enum": [
+            "master_final",
+            "web",
+            "social_vertical",
+            "social_square",
+            "youtube_landscape"
+          ]
+        }
+      }
+    },
+    "deliverables": {
+      "type": "object",
+      "required": [
+        "naming_profile"
+      ],
+      "properties": {
+        "naming_profile": {
+          "type": "string",
+          "default": "NAMING.md#v1"
+        },
+        "master_final": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "examples": [
+            "exports/MASTER_FINAL_<ID>.mp4"
+          ]
+        },
+        "master_web": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "examples": [
+            "exports/MASTER_WEB_<ID>.mp4"
+          ]
+        },
+        "platform_exports": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "captions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "thumbnail": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "qc_report": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "examples": [
+            "reports/QC_<ID>.md"
+          ]
+        },
+        "sources_report": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "examples": [
+            "reports/SOURCES_<ID>.txt"
+          ]
+        }
+      }
+    },
+    "qc_rules": {
+      "type": "object",
+      "properties": {
+        "must_pass": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "loudness",
+              "true_peak",
+              "captions_sync",
+              "caption_line_length",
+              "safe_zones",
+              "no_flash",
+              "logo_present",
+              "palette_lock",
+              "font_lock",
+              "no_scratch_voice",
+              "source_logged"
+            ]
+          }
+        },
+        "tolerance_lu": {
+          "type": "number",
+          "default": 0.5
+        }
+      }
+    },
+    "status": {
+      "enum": [
+        "draft",
+        "review",
+        "approved",
+        "locked",
+        "published"
+      ],
+      "default": "draft"
+    },
+    "notes": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  }
+}

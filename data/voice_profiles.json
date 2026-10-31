@@ -1,0 +1,133 @@
+{
+  "schema_version": "1.1",
+  "default_profile_id": "omar_el_clone_v1",
+  "rule": "طبقة واحدة فقط تُنشر. الافتراضي = الصوت الرسمي المستنسخ (عمر / رِواق عبر Google Colab). البديل للمسودات. المؤقت للتوقيت فقط ويُحذف قبل التصدير.",
+  "profiles": [
+    {
+      "profile_id": "omar_el_clone_v1",
+      "label": "الصوت الرسمي — مستنسخ (Omar / رِواق — Google Colab Studio)",
+      "type": "cloned",
+      "engine": "colab_hybrid_rvc_v2_xtts",
+      "language": "ar-EG",
+      "locked": true,
+      "use": [
+        "published"
+      ],
+      "colab_pipeline": {
+        "notebook": "colab/Riwaq_Voice_Cloning_Studio.ipynb",
+        "drive_root": "/content/drive/MyDrive/Riwaq_Voice_Lab",
+        "modes": {
+          "text_to_omar": "Text (ar-EG) → XTTS-v2 (Golden Reference) or ar-EG-ShakirNeural → RVC v2 (omar_el_clone_v1 48kHz RMVPE) → scripts/voice_finish.py",
+          "voice_to_omar": "Draft / Phone Audio → RVC v2 (omar_el_clone_v1 48kHz RMVPE) → scripts/voice_finish.py"
+        },
+        "rvc_settings": {
+          "sample_rate_hz": 48000,
+          "f0_method": "rmvpe",
+          "embedder_model": "contentvec",
+          "index_rate": 0.45,
+          "protect": 0.35,
+          "pitch_shift_semitones": 0
+        },
+        "post_chain": {
+          "script": "scripts/voice_finish.py",
+          "sample_rate_hz": 48000,
+          "target_lufs": -16.0,
+          "true_peak_dbtp": -1.0,
+          "target_centroid_hz": 380.0
+        }
+      },
+      "style": {
+        "pace": 1.0,
+        "energy": "calm-deep-storyteller",
+        "emotion": "neutral_warm"
+      },
+      "notes": "صوت صاحب المشروع نفسه — يُدرَّب ويُولَّد مجاناً بالكامل على Google Colab (T4 GPU) مع حفظ الموديل على Google Drive دون اشتراكات خارجية."
+    },
+    {
+      "profile_id": "ops_fallback_ar_v1",
+      "label": "بديل تشغيلي (مسودات ومراجعات)",
+      "type": "tts",
+      "engine": "platform_registered",
+      "voice_id_param": "voice-01",
+      "language": "ar",
+      "locked": false,
+      "use": [
+        "drafts",
+        "internal_review"
+      ],
+      "style": {
+        "pace": 1.0,
+        "energy": "calm-deep-storyteller"
+      },
+      "notes": "يُستخدم حين يتعذر الوصول للمستنسخ — نفس القواعد الأدائية، ويُستبدل بالرسمي قبل النشر.",
+      "post_chain": {
+        "status": "approved_by_ear_test_2026-10-07",
+        "script": "scripts/voice_finish.py",
+        "settings": "LUFS −16 · TP ≤ −1.0 dBTP · 48kHz · مطابقة تكيفية لمركز الطيف (380Hz)"
+      },
+      "pitch_shift": {
+        "status": "rejected_by_ear_test",
+        "reason": "تشويش طوري لم تلتقطه المقاييس الطيفية — الأذن حكمت",
+        "do_not_use": true
+      }
+    },
+    {
+      "profile_id": "scratch_timing_v1",
+      "label": "مؤقت التوقيت",
+      "type": "tts",
+      "engine": "any",
+      "language": "ar",
+      "locked": false,
+      "use": [
+        "timing_measurement_only"
+      ],
+      "must_be_replaced_before_export": true
+    }
+  ],
+  "performance_rules": {
+    "hook": {
+      "pace_delta": 0.05,
+      "energy": "higher",
+      "music_delay_ms": 600
+    },
+    "narration": {
+      "pace_delta": 0.0,
+      "energy": "base"
+    },
+    "numbers_dates": {
+      "pace_delta": -0.05,
+      "pause_before_ms": 250,
+      "pause_after_ms": 250,
+      "no_abbreviation": true
+    },
+    "closing": {
+      "pace_delta": -0.03,
+      "energy": "lower",
+      "silence_before_stinger_ms": 500
+    }
+  },
+  "selection_rules": {
+    "by_language": {
+      "ar": [
+        "omar_el_clone_v1",
+        "ops_fallback_ar_v1"
+      ],
+      "ar-EG": [
+        "omar_el_clone_v1",
+        "ops_fallback_ar_v1"
+      ]
+    },
+    "when_clone_unavailable": "ops_fallback_ar_v1 + وسم التسليم بـ DRAFT_VO",
+    "forbidden": "لا يُستخدم أي صوت غير محدَّد هنا — ولا تُخلط طبقتان في تسليم واحد."
+  },
+  "identity_pipeline": {
+    "status": "upgraded_colab_studio_2026-10-31",
+    "operational_voice": "voice-01 + سلسلة الاستوديو (بدون أي إزاحة نغمة)",
+    "published_voice": "الصوت الرسمي المستنسخ على Google Colab (omar_el_clone_v1) + scripts/voice_finish.py (48kHz / -16 LUFS)",
+    "forbidden": [
+      "pitch_shift على التعليق الصوتي في خط الإنتاج",
+      "أي طبقة صوت غير معرّفة في هذا الملف"
+    ],
+    "qa_policy": "أي تغيير في صوت التعليق يمر باختبار استماع إلزامي قبل الثبوت (الأذن تتقدم على المقاييس)"
+  }
+}

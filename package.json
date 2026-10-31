@@ -1,0 +1,27 @@
+{
+  "name": "riwaq-production-system",
+  "version": "1.4.0",
+  "private": true,
+  "description": "Riwaq Production System — data-driven video template (one engine, many identities)",
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "studio": "remotion studio src/index.ts",
+    "props:golden": "python scripts/make_props.py data/projects/GOLDEN_001",
+    "render:golden": "npm run props:golden && remotion render src/index.ts Episode exports/MASTER_WEB_GOLDEN_001.mp4 --props=data/projects/GOLDEN_001/render_props.json --concurrency=1 --crf=18",
+    "render:golden:draft": "npm run props:golden && remotion render src/index.ts Episode exports/_DRAFT_GOLDEN_001.mp4 --props=data/projects/GOLDEN_001/render_props.json --concurrency=1 --scale=0.5",
+    "still": "npm run props:golden && remotion still src/index.ts Episode exports/STILL_GOLDEN_001.png --props=data/projects/GOLDEN_001/render_props.json --frame=45",
+    "qc": "python scripts/qc.py data/projects/GOLDEN_001/episode_meta.json exports reports",
+    "srt": "python scripts/make_srt.py data/projects/GOLDEN_001/episode_meta.json outputs"
+  },
+  "dependencies": {
+    "@remotion/cli": "4.0.533",
+    "@remotion/fonts": "4.0.533",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "remotion": "4.0.533"
+  },
+  "devDependencies": {
+    "@types/react": "18.3.12",
+    "typescript": "5.6.3"
+  }
+}

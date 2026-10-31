@@ -1,0 +1,110 @@
+{
+  "schema_version": "2.0",
+  "brand_ref": { "theme_path": "data/brand.json", "watermark": "on" },
+
+  "project": {
+    "id": "GOLDEN_001",
+    "series_id": "riwaq_heritage_s01",
+    "title": "الاختبار الذهبي — أول فيديو بنظام رِواق",
+    "episode_number": 1,
+    "video_type": "short",
+    "platforms": ["youtube_shorts", "tiktok", "reels"],
+    "aspect_ratios": ["9x16"],
+    "language_primary": "ar-EG",
+    "language_secondary": "en",
+    "priority": "quality"
+  },
+
+  "source": { "type": "none", "rights": "owned", "provenance_note": "اختبار ذهبي — لا مادة مصدر" },
+
+  "story": {
+    "hook": "في زاويةٍ بعيدةٍ من ذاكرة المدن…",
+    "chapters": [{ "title": "الحكاية", "t_in": 0, "t_out": 42 }],
+    "next_tease": "الجزء الجاي: الحكاية اللي محدش كتبها.",
+    "scenes": [
+      { "type": "hook", "t_in": 0, "t_out": 4.5, "kicker": "حكاية اليوم", "title": "في زاويةٍ بعيدةٍ\nمن ذاكرة المدن…" },
+      { "type": "chapter", "t_in": 4.5, "t_out": 7.2, "kicker": "الفصل الأول", "title": "بوابةُ المدينة" },
+      { "type": "quote", "t_in": 7.2, "t_out": 13.2, "text": "«المدنُ تُروى بأزقّتها… لا بأسوارها»", "source": "من المقدمة" },
+      { "type": "stat", "t_in": 13.2, "t_out": 18.4, "number": "٧٣٪", "label": "من الحكايات لم تُوثَّق بعد" },
+      { "type": "lower_third", "t_in": 18.4, "t_out": 24.2, "name": "د. أحمد الشريف", "role": "مؤرّخ — جامعة القاهرة" },
+      { "type": "source", "t_in": 24.2, "t_out": 30.0, "label": "المصدر", "value": "ابن خلدون — المقدمة، باب العمران · تحقيق دار المعارف" },
+      { "type": "end", "t_in": 30.0, "t_out": 42.0 }
+    ]
+  },
+
+  "narration": {
+    "mode": "provided",
+    "profile_id": "omar_el_clone_v1",
+    "replacement_policy": "drafts_allowed",
+    "note": "الاختبار يستخدم الطبقة التشغيلية المعالجة — وعند النشر تُستبدل بالصوت الرسمي بضغطة واحدة",
+    "placement_map": [
+      { "t_in": 0.2, "t_out": 8.9, "type": "vo_hook" },
+      { "t_in": 9.5, "t_out": 24.8, "type": "vo_value" },
+      { "t_in": 25.5, "t_out": 36.0, "type": "vo_cta" }
+    ]
+  },
+
+  "audio": {
+    "vo": [
+      { "src": "projects/GOLDEN_001/audio/vo_01.wav", "t_in": 0.2, "volume_db": 0 },
+      { "src": "projects/GOLDEN_001/audio/vo_02.wav", "t_in": 9.5, "volume_db": 0 },
+      { "src": "projects/GOLDEN_001/audio/vo_03.wav", "t_in": 25.5, "volume_db": 0 }
+    ],
+    "music": { "src": "projects/GOLDEN_001/audio/music.wav", "t_in": 0, "t_out": 42, "volume_db": -24 },
+    "stingers": [
+      { "src": "projects/GOLDEN_001/audio/stinger_in.wav", "t_in": 0.0, "volume_db": -8 },
+      { "src": "projects/GOLDEN_001/audio/stinger_out.wav", "t_in": 39.2, "volume_db": -7 }
+    ]
+  },
+
+  "captions": {
+    "styles": ["keyword_highlight"],
+    "languages": ["ar", "en"],
+    "sync_source": "provided_srt",
+    "data": [
+      { "t_in": 0.9, "t_out": 3.7, "ar": "في زاويةٍ بعيدةٍ من ذاكرة المدن", "en": "In a distant corner of the city's memory", "keywords": ["ذاكرة المدن"] },
+      { "t_in": 4.0, "t_out": 6.9, "ar": "يقفُ رواقٌ من نور", "en": "Stands an arcade of light", "keywords": ["رواقٌ من نور"] },
+      { "t_in": 7.6, "t_out": 10.6, "ar": "سبعمئة سنة… وثلاثة آلاف مخطوطة", "en": "Seven hundred years… three thousand manuscripts", "keywords": ["سبعمئة سنة"] },
+      { "t_in": 10.9, "t_out": 13.0, "ar": "وأغلبها لم يُقرأ بعد", "en": "Most of them unread", "keywords": [] },
+      { "t_in": 13.6, "t_out": 16.2, "ar": "٧٣٪ من الحكايات لم تُوثَّق", "en": "73% of the stories were never documented", "keywords": ["٧٣٪"] },
+      { "t_in": 16.4, "t_out": 18.2, "ar": "مش تواريخ… حكايات", "en": "Not dates… stories", "keywords": ["حكايات"] },
+      { "t_in": 19.0, "t_out": 21.4, "ar": "الروايات تُنقل ولا تُنسخ", "en": "Narratives are carried, not copied", "keywords": ["تُنقل"] },
+      { "t_in": 24.9, "t_out": 27.4, "ar": "المصدر: ابن خلدون — المقدمة", "en": "Source: Ibn Khaldun — The Muqaddimah", "keywords": ["ابن خلدون"] },
+      { "t_in": 31.2, "t_out": 34.6, "ar": "الخلاصة: التاريخ مش تواريخ", "en": "The point: history is not dates", "keywords": ["مش تواريخ"] },
+      { "t_in": 34.9, "t_out": 37.6, "ar": "وكل حكاية تستحق اللي يسمعها", "en": "And every story deserves a listener", "keywords": ["تستحق"] }
+    ]
+  },
+
+  "edit": {
+    "fps": 30,
+    "cut_style": "medium",
+    "duration_s": 42,
+    "music_mood": "warm-story",
+    "stingers": { "in": true, "out": true }
+  },
+
+  "render": {
+    "resolution": [1080, 1920],
+    "preset": "social_vertical",
+    "per_platform_export": true
+  },
+
+  "deliverables": {
+    "naming_profile": "NAMING.md#v1",
+    "master_final": "exports/MASTER_FINAL_GOLDEN_001.mp4",
+    "master_web": "exports/MASTER_WEB_GOLDEN_001.mp4",
+    "platform_exports": ["exports/EXPORT_VERTICAL_GOLDEN_001.mp4"],
+    "captions": ["outputs/CAPTIONS_AR_GOLDEN_001.srt", "outputs/CAPTIONS_EN_GOLDEN_001.srt"],
+    "thumbnail": "exports/THUMB_GOLDEN_001_A.png",
+    "qc_report": "reports/QC_GOLDEN_001.md",
+    "sources_report": "reports/SOURCES_GOLDEN_001.txt"
+  },
+
+  "qc_rules": {
+    "must_pass": ["loudness", "true_peak", "captions_sync", "caption_line_length", "safe_zones", "no_flash", "logo_present", "palette_lock", "font_lock", "no_scratch_voice", "source_logged"],
+    "tolerance_lu": 0.5
+  },
+
+  "status": "draft",
+  "notes": "الاختبار الذهبي: يثبت أن النظام يبني فيديو كاملًا من البيانات فقط — بلا أي تعديل في المكوّنات."
+}

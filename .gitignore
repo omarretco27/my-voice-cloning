@@ -1,0 +1,29 @@
+# Node / Remotion
+node_modules/
+.remotion/
+dist/
+build/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Generated episode outputs (delivered via CI Artifacts / Google Drive)
+exports/
+outputs/
+reports/
+data/projects/*/render_props.json
+
+# Large local datasets & model weights (stored on Google Drive: Riwaq_Voice_Lab/)
+*.pth
+*.index
+*.ckpt
+*.safetensors
+raw_recordings/
+clean_dataset/
+
+# OS
+.DS_Store
+Thumbs.db

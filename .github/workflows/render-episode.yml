@@ -1,0 +1,97 @@
+name: render-episode
+
+on:
+  workflow_dispatch:
+    inputs:
+      project_id:
+        description: "معرّف المشروع داخل data/projects (مثال: GOLDEN_001 أو D04)"
+        required: true
+        default: "GOLDEN_001"
+        type: string
+      draft:
+        description: "مسوّدة سريعة بنصف الدقة للمراجعة؟"
+        required: true
+        default: "لا"
+        type: choice
+        options:
+          - "لا"
+          - "نعم"
+
+jobs:
+  render:
+    name: "Render Riwaq Episode (${{ inputs.project_id }})"
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: سحب المستودع (Checkout)
+        uses: actions/checkout@v4
+
+      - name: تجهيز Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: تجهيز Python 3.11 و FFmpeg
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: تثبيت حزم النظام والصوت
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg libsndfile1
+          pip install --quiet numpy scipy soundfile
+
+      - name: تثبيت حزم Remotion والمتصفح السحابي
+        run: |
+          npm ci
+          npx remotion browser ensure
+
+      - name: بناء ملف Props والكابشنز (SRT)
+        env:
+          PROJECT_ID: ${{ inputs.project_id }}
+        run: |
+          mkdir -p exports outputs reports
+          python3 scripts/make_props.py "data/projects/${PROJECT_ID}"
+          python3 scripts/make_srt.py "data/projects/${PROJECT_ID}/episode_meta.json" outputs
+
+      - name: ريندر الفيديو (Remotion Cloud Render)
+        env:
+          PROJECT_ID: ${{ inputs.project_id }}
+          IS_DRAFT: ${{ inputs.draft }}
+        run: |
+          PROPS_FILE="data/projects/${PROJECT_ID}/render_props.json"
+          if [ "${IS_DRAFT}" = "نعم" ] || [ "${IS_DRAFT}" = "true" ] || [ "${IS_DRAFT}" = "yes" ]; then
+            OUT_MP4="exports/MASTER_WEB_${PROJECT_ID}_DRAFT_VO.mp4"
+            npx remotion render src/index.ts Episode "${OUT_MP4}" \
+              --props="${PROPS_FILE}" \
+              --concurrency=2 \
+              --scale=0.5 \
+              --gl=swangle
+          else
+            OUT_MP4="exports/MASTER_WEB_${PROJECT_ID}.mp4"
+            npx remotion render src/index.ts Episode "${OUT_MP4}" \
+              --props="${PROPS_FILE}" \
+              --concurrency=2 \
+              --crf=18 \
+              --gl=swangle
+          fi
+
+      - name: بوابة فحص الجودة (QC Gate)
+        env:
+          PROJECT_ID: ${{ inputs.project_id }}
+        run: |
+          python3 scripts/qc.py "data/projects/${PROJECT_ID}/episode_meta.json" exports reports
+
+      - name: رفع المخرجات للتحميل (Artifacts)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.project_id }}-deliverables
+          path: |
+            exports/*
+            outputs/*
+            reports/*
+          retention-days: 30
