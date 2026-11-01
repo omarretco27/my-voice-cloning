@@ -10,11 +10,13 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
 import re
 import shutil
+import subprocess
 import sys
 import zipfile
 from datetime import datetime, timezone
@@ -79,108 +81,122 @@ def find_ruwaq_drive_paths(drive_root: str = "/content/drive/MyDrive") -> dict[s
     }
 
 
-def sync_and_curate_voice_samples(paths: dict[str, Path]) -> dict:
-    """يفحص كل ملفات الصوت في «عينة الصوت» (بما فيها أي ملفات جديدة يرفعها عمر مستقبلاً) ويجهز المراجع الذهبية."""
+def compute_samples_signature(samples_dir: Path) -> tuple[str, list[Path]]:
+    """يحسب بصمة سريعة لأسماء وأحجام ملفات «عينة الصوت» لمعرفة ما إذا أضاف عمر عينات جديدة."""
+    files = sorted([
+        p for p in samples_dir.iterdir()
+        if p.is_file() and p.suffix.lower() in prepare_dataset.SUPPORTED_EXTS and not p.name.startswith(".")
+    ])
+    payload = "|".join(f"{p.name}:{p.stat().st_size}" for p in files)
+    sig = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:20]
+    return sig, files
+
+
+def _ensure_applio_for_rvc_inference(applio_dir: str = "/content/Applio") -> bool:
+    """إذا وُجد موديل RVC مدرَّب محفوظ في Google Drive خلال جلسة جديدة، يجهز Applio تلقائياً للاستدلال."""
+    if os.path.exists(applio_dir):
+        return True
+    try:
+        print("🔄 تم اكتشاف موديل RVC مدرَّب في Google Drive — جاري تحميل مشغّل RVC تلقائياً...")
+        subprocess.run(f"git clone --depth 1 https://github.com/IAHispano/Applio.git {applio_dir}", shell=True, check=True)
+        subprocess.run(
+            "pip install -q faiss-cpu soxr einops onnx onnxruntime webrtcvad-wheels resampy stftpitchshift sounddevice",
+            shell=True,
+            check=True,
+        )
+        subprocess.run(
+            "pip install -q --no-deps torchcrepe torchfcpe local-attention",
+            shell=True,
+            check=True,
+        )
+        return True
+    except Exception as exc:
+        print(f"⚠️ تعذّر تجهيز مشغّل RVC تلقائياً ({exc})")
+        return False
+
+
+def sync_and_curate_voice_samples(paths: dict[str, Path], force_rebuild: bool = False) -> dict:
+    """
+    يدير مكتبة عينات عمر بذكاء:
+      1) إذا كانت الحزمة المصفّاة مسبقاً (curated_48k_dataset_v2.zip) مطابقة لملفات «عينة الصوت» الحالية، يفكّها في أقل من ثانية!
+      2) إذا أضاف عمر ملفات صوتية جديدة مستقبلاً، يشغّل المدقق الجنائي الذكي (Forensic Gatekeeper) تلقائياً ويحدّث الحزمة.
+    """
     samples_dir = paths["samples_dir"]
     clean_dir = paths["clean_dir"]
     golden_dir = paths["golden_dir"]
 
-    exts = ("*.wav", "*.mp3", "*.m4a", "*.flac", "*.ogg", "*.aac", "*.mp4")
-    raw_files = []
-    for ext in exts:
-        raw_files.extend(sorted(samples_dir.glob(ext)))
-
+    current_sig, raw_files = compute_samples_signature(samples_dir)
     if not raw_files:
         raise FileNotFoundError(
-            f"لم يتم العثور على ملفات صوتية داخل {samples_dir} — يُرجى وضع ملفات WAV داخل مجلد «عينة الصوت»."
+            f"لم يتم العثور على ملفات صوتية داخل {samples_dir} — يُرجى وضع عيناتك داخل مجلد «عينة الصوت»."
         )
 
-    print(f"🎙️ تم العثور على {len(raw_files)} ملف صوتي خام في «عينة الصوت» — جاري الفحص والتنقية الهندسية...")
+    meta_file = golden_dir / "speaker_profile_meta.json"
+    curated_zip = golden_dir / "curated_48k_dataset_v2.zip"
+    habibi_ref_path = golden_dir / "omar_habibi_ref_8s.wav"
+    openvoice_ref_path = golden_dir / "omar_openvoice_ref_multi.wav"
+
+    if not force_rebuild and meta_file.exists() and habibi_ref_path.exists():
+        try:
+            saved_meta = json.loads(meta_file.read_text(encoding="utf-8"))
+        except Exception:
+            saved_meta = {}
+        if saved_meta.get("raw_files_signature") == current_sig:
+            studio_ar_wavs = list(clean_dir.glob("omar_studio_ar_*.wav"))
+            if not studio_ar_wavs and curated_zip.exists():
+                print("⚡ فك ضغط المقاطع الذهبية المصفّاة مسبقاً (48kHz PCM_16) من Google Drive...")
+                for old_w in clean_dir.glob("*.wav"):
+                    old_w.unlink()
+                with zipfile.ZipFile(str(curated_zip), "r") as zf:
+                    zf.extractall(str(clean_dir))
+                studio_ar_wavs = list(clean_dir.glob("omar_studio_ar_*.wav"))
+            if studio_ar_wavs:
+                saved_meta["habibi_ref_wav"] = str(habibi_ref_path)
+                saved_meta["openvoice_ref_wav"] = str(openvoice_ref_path)
+                print(
+                    f"✅ تم تحميل مكتبة صوت عمر المعتمدة جاهزة: {saved_meta.get('clean_minutes')} دقيقة صافية "
+                    f"({saved_meta.get('clean_segments_count')} مقطع 48kHz · F0={saved_meta.get('omar_median_f0_hz')}Hz)"
+                )
+                return saved_meta
+
+    print(f"🎙️ فحص جنائي وتنقية هندسية لـ {len(raw_files)} ملف في «عينة الصوت»...")
     report_path = str(paths["studio_dir"] / "DATASET_AUDIT_REPORT.md")
-    res = prepare_dataset.run_pipeline(
+    res = prepare_dataset.curate_omar_voice_library(
         raw_dir=str(samples_dir),
         clean_dir=str(clean_dir),
         golden_dir=str(golden_dir),
         report_path=report_path,
         min_sec=3.5,
-        max_sec=9.5,
-        enable_nr=True,
+        max_sec=9.2,
     )
 
-    # اختيار أفضل مرجع لـ Habibi-TTS بطول مثالي (6.5 إلى 9.2 ثانية) لتفادي حد الـ 22 ثانية تماماً
-    segs = sorted(clean_dir.glob("omar_seg_*.wav"))
-    best_habibi_seg = None
-    best_habibi_score = -1.0
-    ov_pool = []
-    f0_values = []
+    all_segs = sorted(clean_dir.glob("omar_*_*.wav")) or sorted(clean_dir.glob("*.wav"))
+    with zipfile.ZipFile(str(curated_zip), "w", zipfile.ZIP_DEFLATED) as zf:
+        for seg_p in all_segs:
+            zf.write(str(seg_p), arcname=seg_p.name)
 
-    for seg in segs:
-        data, sr = sf.read(str(seg), dtype="float32")
-        dur = len(data) / sr
-        rms = float(np.sqrt(np.mean(data ** 2)))
-        sig_stats = prepare_dataset.analyze_signal(data, sr)
-        f0 = sig_stats["f0_hz"]
-        if 65.0 <= f0 <= 180.0:
-            f0_values.append(f0)
-        if 6.2 <= dur <= 9.2:
-            score = sig_stats["snr_db"] * (1.0 - abs(dur - 8.2) / 12.0)
-            if score > best_habibi_score:
-                best_habibi_score = score
-                best_habibi_seg = seg
-        if dur >= 4.5:
-            ov_pool.append((sig_stats["snr_db"], data, sr))
-
-    habibi_ref_path = golden_dir / "omar_habibi_ref_8s.wav"
-    if best_habibi_seg is not None:
-        shutil.copy2(str(best_habibi_seg), str(habibi_ref_path))
-    else:
-        acc = []
-        acc_dur = 0.0
-        pause = np.zeros(int(0.22 * 48000), dtype=np.float32)
-        for seg in segs:
-            d, sr = sf.read(str(seg), dtype="float32")
-            if acc_dur + len(d) / sr <= 9.0:
-                acc.append(d)
-                acc.append(pause)
-                acc_dur += len(d) / sr + 0.22
-            if acc_dur >= 6.8:
-                break
-        merged = np.concatenate(acc) if acc else sf.read(str(segs[0]), dtype="float32")[0]
-        sf.write(str(habibi_ref_path), merged, 48000, subtype="PCM_16")
-
-    # بناء مرجع غني مجمّع (~22–28 ثانية من أنقى المقاطع) لمستخرج البصمة الصوتية في OpenVoice V2
-    ov_pool.sort(key=lambda item: item[0], reverse=True)
-    ov_parts = []
-    ov_dur = 0.0
-    pause_48k = np.zeros(int(0.25 * 48000), dtype=np.float32)
-    for _, arr, sr in ov_pool[:6]:
-        ov_parts.append(arr)
-        ov_parts.append(pause_48k)
-        ov_dur += len(arr) / sr + 0.25
-        if ov_dur >= 24.0:
-            break
-    openvoice_ref_path = golden_dir / "omar_openvoice_ref_multi.wav"
-    if ov_parts:
-        sf.write(str(openvoice_ref_path), np.concatenate(ov_parts), 48000, subtype="PCM_16")
-    else:
-        shutil.copy2(str(habibi_ref_path), str(openvoice_ref_path))
-
-    omar_median_f0 = round(float(np.median(f0_values)), 1) if f0_values else 90.5
     meta = {
-        "raw_files_count": len(raw_files),
-        "clean_segments_count": len(segs),
+        "curation_version": "2.2-forensic",
+        "raw_files_signature": current_sig,
+        "raw_files_count": res["examined_files"],
+        "accepted_files_count": res["accepted_files"],
+        "rejected_files_count": res["rejected_files"],
+        "clean_segments_count": res["segments_count"],
+        "tier_counts": res["tier_counts"],
+        "tier_minutes": res["tier_minutes"],
+        "ar_clean_minutes": res["ar_clean_minutes"],
         "clean_minutes": res["clean_minutes"],
-        "omar_median_f0_hz": omar_median_f0,
+        "omar_median_f0_hz": res["omar_median_f0_hz"],
         "habibi_ref_wav": str(habibi_ref_path),
+        "habibi_source_file": res.get("habibi_source_file", ""),
+        "habibi_ref_text": "",
         "openvoice_ref_wav": str(openvoice_ref_path),
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
-    (golden_dir / "speaker_profile_meta.json").write_text(
-        json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    meta_file.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
     print(
-        f"✅ اكتمل تجهيز البصمة الصوتية لعمر: {res['clean_minutes']} دقيقة صافية "
-        f"({len(segs)} مقطع) · طبقة الصوت الطبيعية العميقة F0 = {omar_median_f0} Hz"
+        f"✅ اكتمل الفحص الجنائي: اعتمدنا {res['accepted_files']} ملف أصلي = {res['clean_minutes']} دقيقة صافية "
+        f"({res['segments_count']} مقطع · طبقة صوت عمر F0 = {res['omar_median_f0_hz']} Hz)"
     )
     return meta
 
@@ -289,17 +305,22 @@ def run_zero_ui_pipeline(drive_root: str = "/content/drive/MyDrive", episode_id:
     work_dir = habibi_pipe.CACHE_DIR / ("work_" + ts)
     work_dir.mkdir(parents=True, exist_ok=True)
 
-    safe_ref_wav, safe_ref_text = habibi_pipe.prepare_safe_habibi_reference(speaker_meta["habibi_ref_wav"], "")
-    print(f"📌 المقطع المرجعي المختار تلقائياً (8 ثوانٍ): {os.path.basename(safe_ref_wav)}")
-    print(f"📌 النص المرجعي المستخرج آلياً: «{safe_ref_text.strip()}»")
+    preset_ref_text = speaker_meta.get("habibi_ref_text", "") or ""
+    safe_ref_wav, safe_ref_text = habibi_pipe.prepare_safe_habibi_reference(
+        speaker_meta["habibi_ref_wav"], preset_ref_text
+    )
+    print(f"📌 المقطع المرجعي الاستوديو (العامية المصرية): {os.path.basename(safe_ref_wav)}")
+    print(f"📌 النص المرجعي: «{safe_ref_text.strip()}»")
 
     s1_master_concat = []
     s2_master_concat = []
+    s1_raw_by_scene: dict[str, str] = {}
     s2_scene_files: list[tuple[str, str]] = []
     pause_48k = np.zeros(int(0.50 * 48000), dtype=np.float32)
 
-    all_clean_segs = [str(p) for p in sorted(paths["clean_dir"].glob("omar_seg_*.wav"))]
-    ov_target_refs = all_clean_segs if all_clean_segs else speaker_meta["openvoice_ref_wav"]
+    # نستخدم مقاطع الاستوديو العربية النقية فقط (35 مقطع = ~3 دقائق استوديو SNR>50dB) لبصمة OpenVoice V2
+    studio_ar_segs = [str(p) for p in sorted(paths["clean_dir"].glob("omar_studio_ar_*.wav"))]
+    ov_target_refs = studio_ar_segs if studio_ar_segs else speaker_meta["openvoice_ref_wav"]
 
     for idx, sc in enumerate(scenes, 1):
         name = sc["name"]
@@ -318,6 +339,8 @@ def run_zero_ui_pipeline(drive_root: str = "/content/drive/MyDrive", episode_id:
             nfe_step=32,
             speed=0.98,
         )
+        s1_raw_by_scene[name] = s1_raw
+
         habibi_pipe.convert_s2_openvoice(
             s1_wav_path=s1_raw,
             target_ref_wav_path=ov_target_refs,
@@ -340,58 +363,68 @@ def run_zero_ui_pipeline(drive_root: str = "/content/drive/MyDrive", episode_id:
     sf.write(out_s1_master, np.concatenate(s1_master_concat), 48000, subtype="PCM_16")
     sf.write(out_s2_master, np.concatenate(s2_master_concat), 48000, subtype="PCM_16")
 
-    # إذا كان لدى عمر موديل RVC v2 مدرَّب في models/، نولّد أيضاً النسخة الثالثة تلقائياً!
+    # البحث عن موديل RVC v2 مدرَّب في models/ أو _rvc_workspace/04_models/ وتمرير Habibi-EGY عبره مباشرة!
     out_s3_master = None
+    s3_scene_files: list[tuple[str, str]] = []
     pth_path, idx_path, _ = rvc_app.find_trained_rvc_artifacts(str(paths["models_dir"]), model_name="omar_el_clone_v1")
-    if pth_path and os.path.exists(pth_path) and os.path.exists("/content/Applio"):
+    if not pth_path:
+        alt_models = paths["studio_dir"] / "_rvc_workspace" / "04_models"
+        pth_path, idx_path, _ = rvc_app.find_trained_rvc_artifacts(str(alt_models), model_name="omar_el_clone_v1")
+
+    if pth_path and os.path.exists(pth_path) and _ensure_applio_for_rvc_inference("/content/Applio"):
         try:
-            print(f"🎛️ وُجد موديل RVC v2 مدرَّب ({os.path.basename(pth_path)}) — جاري توليد النسخة الثالثة...")
+            print(f"🎛️ وُجد موديل RVC v2 الخاص بعمر ({os.path.basename(pth_path)}) — جاري دمج أداء Habibi المصري مع حنجرة عمر 48kHz...")
             rvc_concat = []
+            omar_f0 = float(speaker_meta.get("omar_median_f0_hz") or 90.5)
             for sc in scenes:
-                g_wav = str(work_dir / f"{sc['name']}_guide.wav")
-                r_wav = str(work_dir / f"{sc['name']}_rvc.wav")
-                r_mst = str(work_dir / f"{sc['name']}_rvc_48k.wav")
-                rvc_app.synthesize_edge_ar_eg(sc["text"], g_wav, voice="ar-EG-ShakirNeural", rate_pct=-6)
-                g_arr, g_sr = sf.read(g_wav, dtype="float32")
-                src_f0 = prepare_dataset.analyze_signal(g_arr, g_sr)["f0_hz"]
-                omar_f0 = speaker_meta["omar_median_f0_hz"]
-                semi = int(round(12.0 * math.log2(omar_f0 / src_f0))) if src_f0 >= 75.0 else -5
-                semi = max(-10, min(6, semi))
+                name = sc["name"]
+                src_habibi = s1_raw_by_scene[name]
+                r_wav = str(work_dir / f"{name}_rvc.wav")
+                r_mst = str(work_dir / f"{name}_rvc_48k.wav")
+
+                s_arr, s_sr = sf.read(src_habibi, dtype="float32")
+                src_f0 = prepare_dataset.analyze_signal(s_arr, s_sr)["f0_hz"]
+                semi = int(round(12.0 * math.log2(omar_f0 / src_f0))) if src_f0 >= 70.0 else 0
+                semi = max(-3, min(3, semi))
+
                 rvc_app.convert_with_rvc(
-                    g_wav, r_wav, pth_path=pth_path, index_path=idx_path,
-                    pitch=semi, index_rate=0.55, protect=0.33, applio_dir="/content/Applio",
+                    src_habibi, r_wav, pth_path=pth_path, index_path=idx_path,
+                    pitch=semi, index_rate=0.62, protect=0.33, applio_dir="/content/Applio",
                 )
                 voice_finish.finish(r_wav, r_mst, target_lufs=-16.0, target_centroid=380.0, sr_out=48000, verbose=False)
                 ar, _ = sf.read(r_mst, dtype="float32")
                 rvc_concat.extend([ar, pause_48k])
+                s3_scene_files.append((name, r_mst))
+
             out_s3_master = str(out_dir / "03_Omar_RVC_v2_Master_48k.wav")
             sf.write(out_s3_master, np.concatenate(rvc_concat), 48000, subtype="PCM_16")
         except Exception as exc:
             print(f"⚠️ تعذّر توليد نسخة RVC الإضافية ({exc})")
 
+    best_scene_files = s3_scene_files if s3_scene_files else s2_scene_files
     zip_path = str(out_dir / f"{episode_id}_riwaq_pack.zip")
     print("📝 جاري بناء حزمة الحلقة الكاملة مع كابشنز Faster-Whisper...")
-    build_riwaq_episode_zip_from_scenes(episode_id, s2_scene_files, zip_path, work_dir)
+    build_riwaq_episode_zip_from_scenes(episode_id, best_scene_files, zip_path, work_dir)
 
     print("\n" + "=" * 74)
     print("🎉 تم الانتهاء بنجاح! الملفات الصوتية النهائية محفوظة الآن في Google Drive:")
-    print(f"📂 المسار على درايف: رواق / 06-VOICE-CLONING-STUDIO / outputs")
+    print("📂 المسار على درايف: رواق / 06-VOICE-CLONING-STUDIO / outputs")
     print(f"  1️⃣ {os.path.basename(out_s1_master)}  (Habibi-TTS المصري الأصلي 48kHz / -16 LUFS)")
-    print(f"  2️⃣ {os.path.basename(out_s2_master)}  (Habibi-EGY + بصمة عمر المجمّعة OpenVoice V2)")
+    print(f"  2️⃣ {os.path.basename(out_s2_master)}  (Habibi-EGY + بصمة عمر الاستوديو OpenVoice V2)")
     if out_s3_master:
-        print(f"  3️⃣ {os.path.basename(out_s3_master)}  (نسخة موديل RVC v2 الكامل)")
+        print(f"  3️⃣ {os.path.basename(out_s3_master)}  (⭐ الذروة الإذاعية: Habibi-EGY + موديل RVC v2 48kHz الخاص بعمر)")
     print(f"  📦 {os.path.basename(zip_path)}  (حزمة الريندر الجاهزة لـ GitHub Actions)")
     print("=" * 74)
 
     try:
         from IPython.display import Audio, HTML, display
-        display(HTML("<h3>🎧 1) الاستماع المباشر — Habibi-TTS المصري الأصلي (48kHz / -16 LUFS):</h3>"))
-        display(Audio(filename=out_s1_master))
-        display(HTML("<h3>🎧 2) الاستماع المباشر — Habibi-EGY + بصمة صوت عمر المجمّعة OpenVoice V2:</h3>"))
-        display(Audio(filename=out_s2_master))
         if out_s3_master:
-            display(HTML("<h3>🎧 3) الاستماع المباشر — موديل RVC v2 الكامل الخاص بعمر:</h3>"))
+            display(HTML("<h3>⭐ 1) النسخة الذهبية الأعلى تطابقاً — Habibi المصري + موديل RVC v2 48kHz الخاص بعمر:</h3>"))
             display(Audio(filename=out_s3_master))
+        display(HTML("<h3>🎧 2) الاستماع المباشر — Habibi-TTS المصري الأصلي (48kHz / -16 LUFS):</h3>"))
+        display(Audio(filename=out_s1_master))
+        display(HTML("<h3>🎧 3) الاستماع المباشر — Habibi-EGY + بصمة استوديو عمر المجمّعة OpenVoice V2:</h3>"))
+        display(Audio(filename=out_s2_master))
     except Exception:
         pass
 
@@ -409,24 +442,25 @@ def train_rvc_v2_one_click(
     drive_root: str = "/content/drive/MyDrive",
     applio_dir: str = "/content/Applio",
     epochs: int = 200,
+    episode_id: str = "EP_001",
 ) -> dict:
-    """خلية بضغطة واحدة: تدرّب موديل RVC v2 كامل 48kHz على كل عينات «عينة الصوت» وتحفظه في Google Drive."""
+    """خلية بضغطة واحدة: تدرّب موديل RVC v2 كامل 48kHz على العينات المصفّاة وتحفظه في Google Drive ثم تولّد عينة صوتية فوراً."""
     import riwaq_colab_app as rvc_app
 
     paths = find_ruwaq_drive_paths(drive_root)
     speaker_meta = sync_and_curate_voice_samples(paths)
 
-    # ربط مجلد العمل بنظام Applio على مساحة Google Drive الـ 100GB
     lab_compat_root = paths["studio_dir"] / "_rvc_workspace"
     ws = rvc_app.ensure_drive_workspace(str(lab_compat_root))
     for old_w in Path(ws["clean"]).glob("*.wav"):
         old_w.unlink()
-    for seg in paths["clean_dir"].glob("*.wav"):
+    clean_wavs = sorted(paths["clean_dir"].glob("*.wav"))
+    for seg in clean_wavs:
         shutil.copy2(str(seg), str(Path(ws["clean"]) / seg.name))
 
     print(
         f"🚀 بدء تدريب موديل RVC v2 (48kHz RMVPE) على {speaker_meta['clean_minutes']} دقيقة صافية "
-        f"من مجلد «عينة الصوت» ({epochs} Epoch)..."
+        f"({len(clean_wavs)} مقطع استوديو نقي · {epochs} Epoch)..."
     )
     res = rvc_app.train_omar_rvc_model(
         drive_root=str(lab_compat_root),
@@ -437,11 +471,14 @@ def train_rvc_v2_one_click(
         batch_size=8,
         sample_rate=48000,
     )
-    # نسخ الـ .pth والـ .index النهائيين مباشرة إلى 06-VOICE-CLONING-STUDIO/models/omar_el_clone_v1/
     target_model_dir = paths["models_dir"] / "omar_el_clone_v1"
     target_model_dir.mkdir(parents=True, exist_ok=True)
     if res.get("pth") and os.path.exists(res["pth"]):
         shutil.copy2(res["pth"], str(target_model_dir / os.path.basename(res["pth"])))
     if res.get("index") and os.path.exists(res["index"]):
         shutil.copy2(res["index"], str(target_model_dir / os.path.basename(res["index"])))
+
+    print("\n🎧 اكتمل التدريب! جاري توليد مقطع تجريبي فوري بموديلك الجديد الآن...")
+    gen_res = run_zero_ui_pipeline(drive_root=drive_root, episode_id=episode_id)
+    res["generated_preview"] = gen_res
     return res

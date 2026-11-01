@@ -93,6 +93,35 @@ def find_golden_reference(golden_dir: str) -> str | None:
 
 
 # ── التكامل مع محرك RVC v2 (Applio) ─────────────────────────────────────────
+def _ensure_subprocess_cudnn_guard() -> None:
+    """يضمن تعطيل تعارض مكتبات cuDNN الفرعية في العمليات الفرعية التي يطلقها Applio على Colab."""
+    site_dir = Path("/tmp/riwaq_site")
+    site_dir.mkdir(parents=True, exist_ok=True)
+    sc = site_dir / "sitecustomize.py"
+    if not sc.exists():
+        sc.write_text(
+            "try:\n"
+            "    import torch\n"
+            "    torch.backends.cudnn.enabled = False\n"
+            "except Exception:\n"
+            "    pass\n",
+            encoding="utf-8",
+        )
+    cur_pp = os.environ.get("PYTHONPATH", "")
+    parts = [p for p in cur_pp.split(":") if p]
+    if str(site_dir) not in parts:
+        os.environ["PYTHONPATH"] = ":".join([str(site_dir)] + parts)
+
+
+def _call_applio_index(applio_core, model_name: str, algo: str = "Auto") -> None:
+    import inspect
+    sig = inspect.signature(applio_core.run_index_script)
+    if "index_algorithm" in sig.parameters:
+        applio_core.run_index_script(model_name=model_name, index_algorithm=algo)
+    else:
+        applio_core.run_index_script(model_name=model_name, rvc_algorithm=algo)
+
+
 def _load_applio_core(applio_dir: str = "/content/Applio"):
     adir = Path(applio_dir)
     if not adir.exists():
@@ -129,6 +158,7 @@ def train_omar_rvc_model(
 
     model_dir = Path(ws["models"]) / model_name
     has_resume_ckpt = any(model_dir.glob("G_*.pth")) and any(model_dir.glob("D_*.pth"))
+    _ensure_subprocess_cudnn_guard()
 
     old_cwd = os.getcwd()
     os.chdir(applio_dir)
@@ -167,7 +197,7 @@ def train_omar_rvc_model(
             )
 
             print("3.5/4 🗂 بناء فهرس البصمة الصوتية المبكر (.index) وحفظه على Google Drive...")
-            applio_core.run_index_script(model_name=model_name, rvc_algorithm="Auto")
+            _call_applio_index(applio_core, model_name=model_name, algo="Auto")
         else:
             print("♻ تم العثور على نقطة حفظ سابقة على Google Drive — سيتم استئناف التدريب مباشرة من آخر Epoch!")
 
@@ -196,7 +226,7 @@ def train_omar_rvc_model(
         )
 
         # تحديث الفهرس النهائي إن لزم
-        applio_core.run_index_script(model_name=model_name, rvc_algorithm="Auto")
+        _call_applio_index(applio_core, model_name=model_name, algo="Auto")
     finally:
         os.chdir(old_cwd)
 
@@ -217,6 +247,7 @@ def convert_with_rvc(
     protect: float = 0.35,
     applio_dir: str = "/content/Applio",
 ) -> str:
+    _ensure_subprocess_cudnn_guard()
     old_cwd = os.getcwd()
     os.chdir(applio_dir)
     try:
