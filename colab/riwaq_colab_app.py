@@ -139,6 +139,31 @@ def _load_applio_core(applio_dir: str = "/content/Applio"):
         os.chdir(old_cwd)
 
 
+def _read_saved_rvc_epoch(model_dir: Path) -> int:
+    """يقرأ رقم آخر Epoch محفوظ داخل G_*.pth على Google Drive لمعرفة أين وصل التدريب السابق."""
+    g_files = sorted(model_dir.glob("G_*.pth"), key=lambda p: p.stat().st_mtime)
+    if not g_files:
+        return 0
+    try:
+        import torch
+        ckpt = torch.load(str(g_files[-1]), map_location="cpu", weights_only=False)
+        return int(ckpt.get("iteration", 0) or 0)
+    except Exception:
+        return 0
+
+
+def _clear_cached_features_keep_weights(model_dir: Path) -> None:
+    """يمسح ملفات التقطيع المؤقتة فقط عند إضافة عينات جديدة مع الحفاظ التام على أوزان التدريب السابقة G_*.pth / D_*.pth."""
+    for sub in ("sliced_audios", "sliced_audios_16k", "f0", "f0_voiced", "extracted"):
+        d = model_dir / sub
+        if d.exists():
+            shutil.rmtree(d, ignore_errors=True)
+    for fn in ("filelist.txt", "model_info.json"):
+        fp = model_dir / fn
+        if fp.exists():
+            fp.unlink(missing_ok=True)
+
+
 def train_omar_rvc_model(
     drive_root: str = "/content/drive/MyDrive/Riwaq_Voice_Lab",
     applio_dir: str = "/content/Applio",
@@ -147,17 +172,41 @@ def train_omar_rvc_model(
     save_every_epoch: int = 25,
     batch_size: int = 8,
     sample_rate: int = 48000,
+    dataset_signature: str = "",
+    reset_from_scratch: bool = False,
 ) -> dict:
-    """خط التدريب الأوتوماتيكي الكامل مع دعم الاستئناف الذاتي من Google Drive عند انقطاع الجلسة."""
+    """خط التدريب الأوتوماتيكي الذكي: يدعم الاستئناف، وإضافة عينات جديدة فوق التدريب القديم، وزيادة عدد اللفات تلقائياً."""
     ws = ensure_drive_workspace(drive_root)
-    clean_wavs = list(Path(ws["clean"]).glob("*.wav"))
+    clean_wavs = sorted(Path(ws["clean"]).glob("*.wav"))
     if not clean_wavs:
         raise RuntimeError(
             "مجلد المقاطع المنظفة فارغ! شغّل خلية تجهيز وفحص الصوت رقم (2) أولاً."
         )
 
     model_dir = Path(ws["models"]) / model_name
+    model_dir.mkdir(parents=True, exist_ok=True)
+    if reset_from_scratch and model_dir.exists():
+        print("🔄 بدء تدريب جديد من الصفر حسب طلبك...")
+        shutil.rmtree(model_dir, ignore_errors=True)
+        model_dir.mkdir(parents=True, exist_ok=True)
+
+    sig_file = model_dir / "dataset_signature.txt"
+    prev_sig = sig_file.read_text(encoding="utf-8").strip() if sig_file.exists() else ""
+    cur_sig = dataset_signature or f"{len(clean_wavs)}:{sum(p.stat().st_size for p in clean_wavs)}"
+
     has_resume_ckpt = any(model_dir.glob("G_*.pth")) and any(model_dir.glob("D_*.pth"))
+    saved_epoch = _read_saved_rvc_epoch(model_dir) if has_resume_ckpt else 0
+    has_ready_filelist = (model_dir / "filelist.txt").exists() and (model_dir / "extracted").exists()
+    dataset_changed = bool(prev_sig and prev_sig != cur_sig) or not has_ready_filelist
+
+    if has_resume_ckpt and saved_epoch >= total_epochs:
+        old_target = total_epochs
+        total_epochs = saved_epoch + 100
+        print(
+            f"➕ الموديل مدرَّب مسبقاً حتى Epoch {saved_epoch} (أعلى من أو يساوي {old_target}) — "
+            f"سنزوّد التدريب تلقائياً بـ +100 لفة إضافية ليصل إلى Epoch {total_epochs}!"
+        )
+
     _ensure_subprocess_cudnn_guard()
 
     old_cwd = os.getcwd()
@@ -170,7 +219,13 @@ def train_omar_rvc_model(
         print("1/4 ⬇ التأكد من تحميل الموديلات الأساسية المسبقة (HiFi-GAN 48kHz + RMVPE + ContentVec)...")
         applio_core.run_prerequisites_script(pretraineds_hifigan=True, models=True, exe=False)
 
-        if not has_resume_ckpt:
+        if not has_resume_ckpt or dataset_changed:
+            if has_resume_ckpt and dataset_changed:
+                print(
+                    f"🆕 تم اكتشاف عينات صوتية محدّثة ({len(clean_wavs)} مقطع) — "
+                    f"سنُعيد استخراج السمات الصوتية ونكمّل التدريب فوق موديلك السابق (من Epoch {saved_epoch} إلى {total_epochs})!"
+                )
+                _clear_cached_features_keep_weights(model_dir)
             print(f"2/4 ✂ تجهيز مقاطع التدريب ({len(clean_wavs)} مقطع نقي بتردد {sample_rate}Hz)...")
             applio_core.run_preprocess_script(
                 model_name=model_name,
@@ -196,10 +251,11 @@ def train_omar_rvc_model(
                 include_mutes=2,
             )
 
-            print("3.5/4 🗂 بناء فهرس البصمة الصوتية المبكر (.index) وحفظه على Google Drive...")
+            print("3.5/4 🗂 بناء فهرس البصمة الصوتية (.index) وحفظه على Google Drive...")
             _call_applio_index(applio_core, model_name=model_name, algo="Auto")
+            sig_file.write_text(cur_sig, encoding="utf-8")
         else:
-            print("♻ تم العثور على نقطة حفظ سابقة على Google Drive — سيتم استئناف التدريب مباشرة من آخر Epoch!")
+            print(f"♻ استئناف وتزويد التدريب مباشرة فوق الموديل السابق (من Epoch {saved_epoch} إلى {total_epochs})!")
 
         print(
             f"4/4 🚀 بدء تدريب موديل «{model_name}» حتى {total_epochs} Epoch "

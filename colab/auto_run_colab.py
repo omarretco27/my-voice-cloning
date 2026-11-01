@@ -443,8 +443,9 @@ def train_rvc_v2_one_click(
     applio_dir: str = "/content/Applio",
     epochs: int = 200,
     episode_id: str = "EP_001",
+    reset_from_scratch: bool = False,
 ) -> dict:
-    """خلية بضغطة واحدة: تدرّب موديل RVC v2 كامل 48kHz على العينات المصفّاة وتحفظه في Google Drive ثم تولّد عينة صوتية فوراً."""
+    """خلية بضغطة واحدة: تدرّب أو تكمّل تدريب موديل RVC v2 كامل 48kHz على العينات المصفّاة وتحفظه في Google Drive ثم تولّد عينة صوتية فوراً."""
     import riwaq_colab_app as rvc_app
 
     paths = find_ruwaq_drive_paths(drive_root)
@@ -459,8 +460,8 @@ def train_rvc_v2_one_click(
         shutil.copy2(str(seg), str(Path(ws["clean"]) / seg.name))
 
     print(
-        f"🚀 بدء تدريب موديل RVC v2 (48kHz RMVPE) على {speaker_meta['clean_minutes']} دقيقة صافية "
-        f"({len(clean_wavs)} مقطع استوديو نقي · {epochs} Epoch)..."
+        f"🚀 تجهيز تدريب موديل RVC v2 (48kHz RMVPE) على {speaker_meta['clean_minutes']} دقيقة صافية "
+        f"({len(clean_wavs)} مقطع استوديو نقي)..."
     )
     res = rvc_app.train_omar_rvc_model(
         drive_root=str(lab_compat_root),
@@ -470,6 +471,8 @@ def train_rvc_v2_one_click(
         save_every_epoch=25,
         batch_size=8,
         sample_rate=48000,
+        dataset_signature=speaker_meta.get("raw_files_signature", ""),
+        reset_from_scratch=reset_from_scratch,
     )
     target_model_dir = paths["models_dir"] / "omar_el_clone_v1"
     target_model_dir.mkdir(parents=True, exist_ok=True)
