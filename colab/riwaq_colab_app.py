@@ -57,7 +57,7 @@ def ensure_drive_workspace(drive_root: str = "/content/drive/MyDrive/Riwaq_Voice
 
 
 def find_trained_rvc_artifacts(models_dir: str, model_name: str = "omar_el_clone_v1") -> tuple[str | None, str | None, list[str]]:
-    """البحث عن أحدث ملف وزن (.pth) وملف الفهرس (.index) لموديل عمر على Google Drive."""
+    """البحث عن أحدث ملف وزن (.pth) وملف الفهرس العربي الاستوديو النقي (.index) لموديل عمر على Google Drive."""
     mdir = Path(models_dir) / model_name
     if not mdir.exists():
         return None, None, []
@@ -74,10 +74,147 @@ def find_trained_rvc_artifacts(models_dir: str, model_name: str = "omar_el_clone
     pth_sorted = sorted(pth_candidates, key=_epoch_key)
     best_pth = str(pth_sorted[-1]) if pth_sorted else None
 
-    idx_candidates = sorted(mdir.glob("*.index"), key=lambda p: p.stat().st_mtime)
-    best_idx = str(idx_candidates[-1]) if idx_candidates else None
+    pure_ar_idx = mdir / "omar_studio_ar_pure.index"
+    if pure_ar_idx.exists() and pure_ar_idx.stat().st_size > 1024:
+        best_idx = str(pure_ar_idx)
+    else:
+        idx_candidates = sorted(mdir.glob("*.index"), key=lambda p: p.stat().st_mtime)
+        best_idx = str(idx_candidates[-1]) if idx_candidates else None
 
     return best_pth, best_idx, [str(p) for p in reversed(pth_sorted)]
+
+
+def ensure_pure_arabic_studio_index(
+    clean_dir: str,
+    out_model_dir: str,
+    applio_dir: str = "/content/Applio",
+    rvc_exp_dir: str | None = None,
+) -> tuple[str | None, bool]:
+    """
+    يبني ويحفظ فهرس FAISS نقياً 100% من مقاطع الاستوديو العربية المصرية فقط (omar_studio_ar_*.wav)
+    بصفر مقاطع إنجليزية وصفر تسجيلات غرف صدى، لمنع أي انحراف في مخارج الحروف المصرية (ق، ع، غ، النهارده).
+    يستغرق بناؤه ~2 ثانية فقط أول مرة على GPU ثم يُقرأ فوراً من الكاش على Google Drive.
+    """
+    import hashlib
+
+    cdir = Path(clean_dir)
+    mdir = Path(out_model_dir)
+    mdir.mkdir(parents=True, exist_ok=True)
+    pure_idx_path = mdir / "omar_studio_ar_pure.index"
+    sig_path = mdir / "omar_studio_ar_pure.sig"
+
+    ar_wavs = sorted(cdir.glob("omar_studio_ar_*.wav")) if cdir.exists() else []
+    if not ar_wavs and cdir.exists():
+        ar_wavs = sorted(p for p in cdir.glob("*.wav") if not p.name.startswith("omar_studio_en_"))
+
+    if not ar_wavs:
+        if pure_idx_path.exists() and pure_idx_path.stat().st_size > 1024:
+            return str(pure_idx_path), True
+        fallback = sorted(mdir.glob("*.index"), key=lambda p: p.stat().st_mtime)
+        return (str(fallback[-1]), False) if fallback else (None, False)
+
+    sig_payload = "|".join(f"{p.name}:{p.stat().st_size}" for p in ar_wavs)
+    cur_sig = hashlib.sha1(sig_payload.encode("utf-8")).hexdigest()[:20]
+
+    if pure_idx_path.exists() and pure_idx_path.stat().st_size > 1024 and sig_path.exists():
+        if sig_path.read_text(encoding="utf-8").strip() == cur_sig:
+            return str(pure_idx_path), True
+
+    npys: list[np.ndarray] = []
+
+    # المسار 1 (الأسرع والأدق): استخلاص ContentVec مباشرة من مقاطع omar_studio_ar_*.wav على GPU (~2 ثانية)
+    try:
+        import faiss
+        import torch
+
+        old_cwd = os.getcwd()
+        os.chdir(applio_dir)
+        try:
+            if applio_dir not in sys.path:
+                sys.path.insert(0, applio_dir)
+            from rvc.lib.utils import load_audio, load_embedding
+
+            device = "cuda:0" if torch.cuda.is_available() else "cpu"
+            embedder = load_embedding("contentvec", None).float().to(device).eval()
+
+            print(f"🎯 بناء فهرس الحروف المصرية النقي (omar_studio_ar_pure.index) من {len(ar_wavs)} مقطع استوديو عربي خالص...")
+            with torch.no_grad():
+                for wp in ar_wavs:
+                    wav_16k = load_audio(str(wp), 16000)
+                    feats_t = torch.from_numpy(wav_16k).float().to(device).view(1, -1)
+                    out = embedder(feats_t)["last_hidden_state"].squeeze(0).float().cpu().numpy()
+                    if out.ndim == 2 and out.shape[1] == 768 and not np.isnan(out).any():
+                        npys.append(out)
+            del embedder
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        finally:
+            os.chdir(old_cwd)
+    except Exception as exc_gpu:
+        print(f"ℹ️ الانتقال إلى مطابقة مقاطع extracted لبناء الفهرس العربي النقي ({exc_gpu})...")
+
+    # المسار 2 الاحتياطي: مطابقة البصمة الموجية مع sliced_audios/extracted إن تعذر المسار الأول
+    if not npys and rvc_exp_dir:
+        exp_p = Path(rvc_exp_dir)
+        sliced_dir = exp_p / "sliced_audios"
+        ext_dir = exp_p / "extracted"
+        if sliced_dir.exists() and ext_dir.exists():
+            try:
+                ar_sigs = []
+                for wp in ar_wavs:
+                    a, _ = sf.read(str(wp), dtype="float32")
+                    if a.ndim > 1:
+                        a = a.mean(axis=1)
+                    env = np.abs(a)[::480]
+                    env = env / (float(np.linalg.norm(env)) + 1e-9)
+                    ar_sigs.append(env)
+                for sw in sorted(sliced_dir.glob("0_*_0.wav")):
+                    sa, _ = sf.read(str(sw), dtype="float32")
+                    if sa.ndim > 1:
+                        sa = sa.mean(axis=1)
+                    senv = np.abs(sa)[::480]
+                    senv = senv / (float(np.linalg.norm(senv)) + 1e-9)
+                    matched = False
+                    for env in ar_sigs:
+                        if abs(len(env) - len(senv)) <= 3:
+                            n = min(len(env), len(senv))
+                            if n > 8 and float(np.dot(env[:n], senv[:n])) > 0.94:
+                                matched = True
+                                break
+                    if matched:
+                        npy_p = ext_dir / (sw.stem + ".npy")
+                        if npy_p.exists():
+                            arr = np.load(str(npy_p))
+                            if arr.ndim == 2 and arr.shape[1] == 768 and not np.isnan(arr).any():
+                                npys.append(arr.astype("float32"))
+            except Exception:
+                pass
+
+    if npys:
+        try:
+            import faiss
+
+            big_npy = np.concatenate(npys, axis=0).astype("float32")
+            np.random.RandomState(42).shuffle(big_npy)
+            n_ivf = max(1, min(int(16 * np.sqrt(big_npy.shape[0])), max(1, big_npy.shape[0] // 39)))
+            index = faiss.index_factory(768, f"IVF{n_ivf},Flat")
+            index_ivf = faiss.extract_index_ivf(index)
+            index_ivf.nprobe = 1
+            index.train(big_npy)
+            for i in range(0, big_npy.shape[0], 8192):
+                index.add(big_npy[i : i + 8192])
+            faiss.write_index(index, str(pure_idx_path))
+            sig_path.write_text(cur_sig, encoding="utf-8")
+            if rvc_exp_dir and Path(rvc_exp_dir).exists() and Path(rvc_exp_dir).resolve() != mdir.resolve():
+                shutil.copy2(str(pure_idx_path), str(Path(rvc_exp_dir) / "omar_studio_ar_pure.index"))
+                (Path(rvc_exp_dir) / "omar_studio_ar_pure.sig").write_text(cur_sig, encoding="utf-8")
+            print(f"✅ اكتمل حفظ الفهرس العربي الاستوديو النقي ({big_npy.shape[0]} متجه عربي خالص · صفر إنجليزي)!")
+            return str(pure_idx_path), True
+        except Exception as exc_idx:
+            print(f"⚠️ تعذّر كتابة الفهرس العربي المخصص ({exc_idx})")
+
+    fallback = sorted(mdir.glob("*.index"), key=lambda p: p.stat().st_mtime)
+    return (str(fallback[-1]), False) if fallback else (None, False)
 
 
 def find_golden_reference(golden_dir: str) -> str | None:
@@ -286,6 +423,14 @@ def train_omar_rvc_model(
     finally:
         os.chdir(old_cwd)
 
+    # بناء الفهرس العربي الاستوديو النقي (صفر إنجليزي وصفر غرف صدى) بجانب الفهرس العام
+    ensure_pure_arabic_studio_index(
+        clean_dir=ws["clean"],
+        out_model_dir=str(model_dir),
+        applio_dir=applio_dir,
+        rvc_exp_dir=str(model_dir),
+    )
+
     pth, idx, all_pths = find_trained_rvc_artifacts(ws["models"], model_name=model_name)
     print(f"\n✅ اكتمل التدريب وحُفظ الموديل بأمان على Google Drive!")
     print(f"   • ملف الوزن (.pth)  : {pth}")
@@ -299,10 +444,18 @@ def convert_with_rvc(
     pth_path: str,
     index_path: str | None = None,
     pitch: int = 0,
-    index_rate: float = 0.45,
-    protect: float = 0.35,
+    index_rate: float = 0.30,
+    protect: float = 0.14,
+    volume_envelope: float = 1.0,
     applio_dir: str = "/content/Applio",
 ) -> str:
+    """
+    تحويل الصوت عبر RVC v2 بإعدادات مخارج الحروف المصرية فائقة الوضوح:
+    • protect=0.14 يحفظ 86% من السواكن غير المهموسة الأصلية (ك، ت، س، ش، هـ، خ، ح، ف) في pipeline.py
+      مع تحويل 100% من الحروف الجهرية والمدود إلى حنجرة عمر (pitchf > 0).
+    • volume_envelope=1.0 يتجاوز نافذة ضغط RMS ذات الثانية الكاملة ليحفظ انفجار الحروف الساكنة (ب، ق، ء).
+    • index_rate=0.30 مع الفهرس العربي الاستوديو النقي يمنح دفء عمر الاستوديو دون أي انحراف إنجليزي.
+    """
     _ensure_subprocess_cudnn_guard()
     old_cwd = os.getcwd()
     os.chdir(applio_dir)
@@ -314,7 +467,7 @@ def convert_with_rvc(
         applio_core.run_infer_script(
             pitch=int(pitch),
             index_rate=float(index_rate) if index_path else 0.0,
-            volume_envelope=0.85,
+            volume_envelope=float(volume_envelope),
             protect=float(protect),
             f0_method="rmvpe",
             input_path=os.path.abspath(input_wav),
@@ -444,8 +597,8 @@ def produce_episode_pack(
     applio_dir: str = "/content/Applio",
     model_name: str = "omar_el_clone_v1",
     pitch_shift: int = 0,
-    index_rate: float = 0.45,
-    protect: float = 0.35,
+    index_rate: float = 0.30,
+    protect: float = 0.14,
     pace_pct: int = 0,
     target_lufs: float = -16.0,
     run_whisper_captions: bool = True,
@@ -526,8 +679,9 @@ def produce_episode_pack(
             src_for_master,
             final_wav,
             target_lufs=target_lufs,
-            target_centroid=380.0,
+            target_centroid=None,
             sr_out=48000,
+            clarity_profile="omar_rvc" if needs_rvc else "standard",
             verbose=True,
         )
 

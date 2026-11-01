@@ -93,22 +93,35 @@ def compute_samples_signature(samples_dir: Path) -> tuple[str, list[Path]]:
 
 
 def _ensure_applio_for_rvc_inference(applio_dir: str = "/content/Applio") -> bool:
-    """إذا وُجد موديل RVC مدرَّب محفوظ في Google Drive خلال جلسة جديدة، يجهز Applio تلقائياً للاستدلال."""
-    if os.path.exists(applio_dir):
-        return True
+    """إذا وُجد موديل RVC مدرَّب محفوظ في Google Drive خلال جلسة جديدة، يجهز Applio وملفات RMVPE/ContentVec تلقائياً للاستدلال."""
     try:
-        print("🔄 تم اكتشاف موديل RVC مدرَّب في Google Drive — جاري تحميل مشغّل RVC تلقائياً...")
-        subprocess.run(f"git clone --depth 1 https://github.com/IAHispano/Applio.git {applio_dir}", shell=True, check=True)
-        subprocess.run(
-            "pip install -q faiss-cpu soxr einops onnx onnxruntime webrtcvad-wheels resampy stftpitchshift sounddevice",
-            shell=True,
-            check=True,
-        )
-        subprocess.run(
-            "pip install -q --no-deps torchcrepe torchfcpe local-attention",
-            shell=True,
-            check=True,
-        )
+        if not os.path.exists(applio_dir):
+            print("🔄 تم اكتشاف موديل RVC مدرَّب في Google Drive — جاري تجهيز مشغّل RVC تلقائياً...")
+            subprocess.run("apt-get install -y -qq libportaudio2 ffmpeg", shell=True, check=False)
+            subprocess.run(f"git clone --depth 1 https://github.com/IAHispano/Applio.git {applio_dir}", shell=True, check=True)
+            subprocess.run(
+                "pip install -q faiss-cpu soxr einops onnx onnxruntime webrtcvad-wheels resampy stftpitchshift sounddevice",
+                shell=True,
+                check=True,
+            )
+            subprocess.run(
+                "pip install -q --no-deps torchcrepe torchfcpe local-attention",
+                shell=True,
+                check=True,
+            )
+
+        rmvpe_pt = Path(applio_dir) / "rvc" / "models" / "predictors" / "rmvpe.pt"
+        if not rmvpe_pt.exists():
+            old_cwd = os.getcwd()
+            os.chdir(applio_dir)
+            try:
+                if applio_dir not in sys.path:
+                    sys.path.insert(0, applio_dir)
+                import core as applio_core
+                print("⬇ جاري تنزيل محدد الطبقة الصوتية (RMVPE + ContentVec) للاستدلال الفوري...")
+                applio_core.run_prerequisites_script(pretraineds_hifigan=False, models=True, exe=False)
+            finally:
+                os.chdir(old_cwd)
         return True
     except Exception as exc:
         print(f"⚠️ تعذّر تجهيز مشغّل RVC تلقائياً ({exc})")
@@ -348,8 +361,8 @@ def run_zero_ui_pipeline(drive_root: str = "/content/drive/MyDrive", episode_id:
             tau=0.3,
         )
 
-        voice_finish.finish(s1_raw, s1_mst, target_lufs=-16.0, target_centroid=380.0, sr_out=48000, verbose=False)
-        voice_finish.finish(s2_raw, s2_mst, target_lufs=-16.0, target_centroid=380.0, sr_out=48000, verbose=False)
+        voice_finish.finish(s1_raw, s1_mst, target_lufs=-16.0, target_centroid=450.0, sr_out=48000, verbose=False)
+        voice_finish.finish(s2_raw, s2_mst, target_lufs=-16.0, target_centroid=445.0, sr_out=48000, verbose=False)
 
         a1, _ = sf.read(s1_mst, dtype="float32")
         a2, _ = sf.read(s2_mst, dtype="float32")
@@ -366,20 +379,39 @@ def run_zero_ui_pipeline(drive_root: str = "/content/drive/MyDrive", episode_id:
     # البحث عن موديل RVC v2 مدرَّب في models/ أو _rvc_workspace/04_models/ وتمرير Habibi-EGY عبره مباشرة!
     out_s3_master = None
     s3_scene_files: list[tuple[str, str]] = []
+    alt_exp_dir = paths["studio_dir"] / "_rvc_workspace" / "04_models" / "omar_el_clone_v1"
     pth_path, idx_path, _ = rvc_app.find_trained_rvc_artifacts(str(paths["models_dir"]), model_name="omar_el_clone_v1")
     if not pth_path:
-        alt_models = paths["studio_dir"] / "_rvc_workspace" / "04_models"
-        pth_path, idx_path, _ = rvc_app.find_trained_rvc_artifacts(str(alt_models), model_name="omar_el_clone_v1")
+        pth_path, idx_path, _ = rvc_app.find_trained_rvc_artifacts(
+            str(paths["studio_dir"] / "_rvc_workspace" / "04_models"),
+            model_name="omar_el_clone_v1",
+        )
 
     if pth_path and os.path.exists(pth_path) and _ensure_applio_for_rvc_inference("/content/Applio"):
         try:
-            print(f"🎛️ وُجد موديل RVC v2 الخاص بعمر ({os.path.basename(pth_path)}) — جاري دمج أداء Habibi المصري مع حنجرة عمر 48kHz...")
+            # ضمان استخدام الفهرس العربي الاستوديو النقي 100% (بصفر متجهات إنجليزية وصفر غرف صدى)
+            pure_idx_path, is_pure_ar = rvc_app.ensure_pure_arabic_studio_index(
+                clean_dir=str(paths["clean_dir"]),
+                out_model_dir=str(Path(pth_path).parent),
+                applio_dir="/content/Applio",
+                rvc_exp_dir=str(alt_exp_dir) if alt_exp_dir.exists() else None,
+            )
+            eff_idx_path = pure_idx_path if is_pure_ar else None
+            eff_idx_rate = 0.30 if is_pure_ar else 0.0
+
+            print(
+                f"🎛️ وُجد موديل RVC v2 الخاص بعمر ({os.path.basename(pth_path)}) — "
+                f"تشغيل وضع «وضوح مخارج الحروف المصرية + قرار عمر 48kHz» "
+                f"(protect=0.14 · pure_ar_index={'نعم' if is_pure_ar else 'تلقائي'} · Centroid=490Hz)..."
+            )
             rvc_concat = []
             omar_f0 = float(speaker_meta.get("omar_median_f0_hz") or 90.5)
             for sc in scenes:
                 name = sc["name"]
                 src_habibi = s1_raw_by_scene[name]
+                s1_cond = str(work_dir / f"{name}_s1_for_rvc.wav")
                 r_wav = str(work_dir / f"{name}_rvc.wav")
+                r_crisp = str(work_dir / f"{name}_rvc_crisp.wav")
                 r_mst = str(work_dir / f"{name}_rvc_48k.wav")
 
                 s_arr, s_sr = sf.read(src_habibi, dtype="float32")
@@ -387,11 +419,41 @@ def run_zero_ui_pipeline(drive_root: str = "/content/drive/MyDrive", episode_id:
                 semi = int(round(12.0 * math.log2(omar_f0 / src_f0))) if src_f0 >= 70.0 else 0
                 semi = max(-3, min(3, semi))
 
+                # 1) تهيئة فورمانتات الحروف العربية قبل ContentVec
+                voice_finish.condition_habibi_for_rvc(src_habibi, s1_cond, sr_out=48000)
+
+                # 2) استنساخ حنجرة عمر بحماية 86% للسواكن المصرية ودون ضغط غلاف الثانية الكاملة
                 rvc_app.convert_with_rvc(
-                    src_habibi, r_wav, pth_path=pth_path, index_path=idx_path,
-                    pitch=semi, index_rate=0.62, protect=0.33, applio_dir="/content/Applio",
+                    s1_cond,
+                    r_wav,
+                    pth_path=pth_path,
+                    index_path=eff_idx_path,
+                    pitch=semi,
+                    index_rate=eff_idx_rate,
+                    protect=0.14,
+                    volume_envelope=1.0,
+                    applio_dir="/content/Applio",
                 )
-                voice_finish.finish(r_wav, r_mst, target_lufs=-16.0, target_centroid=380.0, sr_out=48000, verbose=False)
+
+                # 3) استعادة حواف الحروف الساكنة غير المهموسة (3.5–10.2 kHz) بتزامن المللي ثانية
+                voice_finish.blend_habibi_consonant_transients(
+                    r_wav,
+                    src_habibi,
+                    r_crisp,
+                    sr_out=48000,
+                    max_hf_mix=0.22,
+                )
+
+                # 4) ماسترينج استوديو عمر الحقيقي (Centroid ~490Hz · -16 LUFS · بدون أي pitch-shift)
+                voice_finish.finish(
+                    r_crisp,
+                    r_mst,
+                    target_lufs=-16.0,
+                    target_centroid=None,
+                    sr_out=48000,
+                    clarity_profile="omar_rvc",
+                    verbose=False,
+                )
                 ar, _ = sf.read(r_mst, dtype="float32")
                 rvc_concat.extend([ar, pause_48k])
                 s3_scene_files.append((name, r_mst))
@@ -480,6 +542,11 @@ def train_rvc_v2_one_click(
         shutil.copy2(res["pth"], str(target_model_dir / os.path.basename(res["pth"])))
     if res.get("index") and os.path.exists(res["index"]):
         shutil.copy2(res["index"], str(target_model_dir / os.path.basename(res["index"])))
+    src_exp_dir = Path(ws["models"]) / "omar_el_clone_v1"
+    for extra_name in ("omar_studio_ar_pure.index", "omar_studio_ar_pure.sig"):
+        extra_src = src_exp_dir / extra_name
+        if extra_src.exists():
+            shutil.copy2(str(extra_src), str(target_model_dir / extra_name))
 
     print("\n🎧 اكتمل التدريب! جاري توليد مقطع تجريبي فوري بموديلك الجديد الآن...")
     gen_res = run_zero_ui_pipeline(drive_root=drive_root, episode_id=episode_id)

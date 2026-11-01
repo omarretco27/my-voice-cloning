@@ -17,14 +17,17 @@
 """
 import argparse
 import glob
+import math
 import os
 import sys
 import numpy as np
 import soundfile as sf
 
 try:
+    from scipy import signal as sig
     from scipy.signal import lfilter as _scipy_lfilter
 except ImportError:
+    sig = None
     _scipy_lfilter = None
 
 DEFAULT_SR = 48000
@@ -287,13 +290,139 @@ def true_peak_limit(x: np.ndarray, ceiling_db: float = -1.0) -> np.ndarray:
     return (y * (c / float(np.max(np.abs(y))))).astype(np.float32)
 
 
+def condition_habibi_for_rvc(
+    path_in: str,
+    path_out: str,
+    sr_out: int = DEFAULT_SR,
+) -> str:
+    """
+    تهيئة صوتية دقيقة لخرج Habibi-TTS قبل دخوله إلى ContentVec + RMVPE في RVC v2:
+    تُبرز فورمانتات الحروف العربية الحلقية والانفجارية (ع، ق، غ، ب، ت، ك، هـ، ء) في نطاق 2–5 kHz
+    دون أي تشويه، ليقرأها ContentVec بوضوح تام قبل توليد حبال عمر الصوتية.
+    """
+    d, sr = sf.read(path_in, dtype="float32")
+    if d.ndim > 1:
+        d = d.mean(axis=1)
+    x = resample(d, sr, sr_out)
+    x = x - float(np.mean(x))
+    x = hpf(x, 75, 3, sr=sr_out)
+    x = peak_eq(x, 320, -1.2, 1.0, sr=sr_out)
+    x = peak_eq(x, 2500, +2.4, 0.8, sr=sr_out)
+    x = peak_eq(x, 4800, +1.2, 0.9, sr=sr_out)
+    x = true_peak_limit(x, -1.5)
+    os.makedirs(os.path.dirname(os.path.abspath(path_out)), exist_ok=True)
+    sf.write(path_out, x, sr_out, subtype="PCM_16")
+    return path_out
+
+
+def blend_habibi_consonant_transients(
+    rvc_wav_path: str,
+    habibi_wav_path: str,
+    out_wav_path: str,
+    sr_out: int = DEFAULT_SR,
+    max_hf_mix: float = 0.22,
+) -> str:
+    """
+    يمزج نبضات الحروف الساكنة غير المهموسة عالية التردد (3.5–10.2 kHz مثل ك، ت، س، ش، هـ، ح، خ، ف)
+    من أداء Habibi-TTS المصري الأصلي فوق خرج RVC v2 بدقة متزامنة بالمللي ثانية، مع إبقاء
+    الحروف المتحركة والرنين الصدري بنسبة 100% من حنجرة عمر (RVC HiFi-GAN) بلا أي ازدواج صوتي.
+    """
+    r_raw, r_sr = sf.read(rvc_wav_path, dtype="float32")
+    h_raw, h_sr = sf.read(habibi_wav_path, dtype="float32")
+    if r_raw.ndim > 1:
+        r_raw = r_raw.mean(axis=1)
+    if h_raw.ndim > 1:
+        h_raw = h_raw.mean(axis=1)
+
+    r = resample(r_raw, r_sr, sr_out)
+    h = resample(h_raw, h_sr, sr_out)
+
+    if sig is None or len(r) < int(0.15 * sr_out) or len(h) < int(0.15 * sr_out):
+        os.makedirs(os.path.dirname(os.path.abspath(out_wav_path)), exist_ok=True)
+        sf.write(out_wav_path, r, sr_out, subtype="PCM_16")
+        return out_wav_path
+
+    # مطابقة مستوى RMS العام قبل استخلاص النبضات الساكنة
+    r_rms = float(np.sqrt(np.mean(r * r) + 1e-12))
+    h_rms = float(np.sqrt(np.mean(h * h) + 1e-12))
+    h = (h * (r_rms / max(h_rms, 1e-6))).astype(np.float32)
+
+    # محاذاة زمنية دقيقة عبر الارتباط المتبادل لغلاف الطاقة (ضمن نافذة ±80ms)
+    env_step = max(1, sr_out // 1000)  # دقة 1ms
+    n_min = min(len(r), len(h))
+    r_env = np.abs(r[:n_min])[::env_step]
+    h_env = np.abs(h[:n_min])[::env_step]
+    max_lag_ms = 80
+    if len(r_env) > 2 * max_lag_ms + 10:
+        best_lag = 0
+        best_corr = -1.0
+        r_norm = r_env - float(np.mean(r_env))
+        h_norm = h_env - float(np.mean(h_env))
+        for lag in range(-max_lag_ms, max_lag_ms + 1):
+            if lag < 0:
+                a, b = r_norm[:lag], h_norm[-lag:]
+            elif lag > 0:
+                a, b = r_norm[lag:], h_norm[:-lag]
+            else:
+                a, b = r_norm, h_norm
+            if len(a) < 32:
+                continue
+            c = float(np.dot(a, b) / (math.sqrt(float(np.dot(a, a) * np.dot(b, b))) + 1e-12))
+            if c > best_corr:
+                best_corr = c
+                best_lag = lag
+        shift_samples = best_lag * env_step
+        if shift_samples > 0:
+            h = np.concatenate([np.zeros(shift_samples, dtype=np.float32), h])
+        elif shift_samples < 0:
+            h = h[-shift_samples:]
+
+    if len(h) < len(r):
+        h = np.concatenate([h, np.zeros(len(r) - len(h), dtype=np.float32)])
+    else:
+        h = h[:len(r)]
+
+    # استخلاص حزمة الحروف الساكنة المهموسة فقط (3500–10200 Hz) بمرشح صفري الطور (Zero-Phase)
+    nyq = 0.5 * sr_out
+    hi_cut = min(10200.0 / nyq, 0.92)
+    lo_cut = 3500.0 / nyq
+    sos_hf = sig.butter(4, [lo_cut, hi_cut], btype="bandpass", output="sos")
+    sos_lf = sig.butter(3, [85.0 / nyq, 750.0 / nyq], btype="bandpass", output="sos")
+
+    h_hf = sig.sosfiltfilt(sos_hf, h).astype(np.float32)
+    r_hf = sig.sosfiltfilt(sos_hf, r).astype(np.float32)
+    h_lf = sig.sosfiltfilt(sos_lf, h).astype(np.float32)
+
+    # بوابة ذكية تفتح فقط عند السواكن والانفجارات الصوتية (حيث تعلو طاقة الترددات العالية على الحروف المدّية)
+    win = max(1, int(0.008 * sr_out))  # نافذة 8ms ناعمة
+    kernel = np.ones(win, dtype=np.float32) / float(win)
+    e_hf = np.sqrt(np.convolve(h_hf * h_hf, kernel, mode="same") + 1e-12)
+    e_lf = np.sqrt(np.convolve(h_lf * h_lf, kernel, mode="same") + 1e-12)
+
+    ratio = e_hf / (e_lf + 0.004)
+    # المدود والحروف الجهرية يكون فيها ratio < 0.15 فتغلق البوابة تماماً (0.0)؛ السواكن تقفز فوق 0.35
+    gate = np.clip((ratio - 0.18) / 0.55, 0.0, 1.0)
+    smooth_win = max(1, int(0.006 * sr_out))
+    gate = np.convolve(gate, np.ones(smooth_win, dtype=np.float32) / float(smooth_win), mode="same")
+
+    # تعويض الفرق الساكن فقط دون مضاعفة ما أنتجه RVC بالفعل
+    hf_deficit = (h_hf - 0.55 * r_hf).astype(np.float32)
+    blended = (r + (max_hf_mix * gate * hf_deficit)).astype(np.float32)
+    blended = true_peak_limit(blended, -1.0)
+
+    os.makedirs(os.path.dirname(os.path.abspath(out_wav_path)), exist_ok=True)
+    sf.write(out_wav_path, blended, sr_out, subtype="PCM_16")
+    return out_wav_path
+
+
 def finish(
     path_in: str,
     path_out: str,
     target_lufs: float = -16.0,
-    target_centroid: float = 380.0,
+    target_centroid: float | None = None,
     sr_out: int = DEFAULT_SR,
     compress_gaps: bool = True,
+    clarity_profile: str = "standard",
     verbose: bool = True,
 ) -> dict:
     d, sr = sf.read(path_in, dtype="float32")
@@ -306,16 +435,33 @@ def finish(
     pre_f0 = _f0(x, sr=sr_out)
     pre_lu = lufs(x, sr=sr_out)
 
-    x = hpf(x, 70, 3, sr=sr_out)                         # 1 تنظيف الترددات المنخفضة (Rumble)
-    x = peak_eq(x, 250, +2.2, 0.9, sr=sr_out)            # 2 دفء الصدر (Body)
-    x = peak_eq(x, 1800, +1.5, 0.8, sr=sr_out)           # 3 وضوح النطق ومخارج الحروف العربية
-    x = peak_eq(x, 4200, -2.8, 1.1, sr=sr_out)           # 4 إزالة الحدة الرقمية (إحساس الـ AI)
-    x = high_shelf(x, 9000, -1.5, sr=sr_out)             # 5 تهدئة السطوع الزائد
-    if compress_gaps:
-        x = compress_silences(x, sr=sr_out)              # 6 ضغط السكتات لإيقاع مشدود
-    x = compress(x, -20, 2.0, 0.012, 0.18, 3.0, sr=sr_out)  # 7 ضغط ديناميكي ناعم
-    x = room(x, 0.05, sr=sr_out)                         # 8 غرفة استوديو خفيفة جداً (5%)
-    x, boost = match_reference(x, target_centroid, sr=sr_out)  # 8.5 مطابقة مركز الطيف للمرجع
+    if clarity_profile == "omar_rvc":
+        # معايرة مطابقة لبصمة مايك استوديو عمر الحقيقي (Centroid ~490Hz · وضوح مخارج الحروف المصرية مع دفء الصدر 90Hz)
+        eff_centroid = 490.0 if target_centroid is None else float(target_centroid)
+        x = hpf(x, 58, 2, sr=sr_out)                         # 1 تنظيف الرومبل تحت 58Hz مع حفظ قرار الصدر 90Hz بنسبة 100%
+        x = peak_eq(x, 185, +1.6, 0.9, sr=sr_out)            # 2 دفء الصدر الطبيعي لعمر
+        x = peak_eq(x, 340, -1.4, 1.1, sr=sr_out)            # 3 إزالة الكتمة الصندوقية التي تغطي مخارج الحروف
+        x = peak_eq(x, 2850, +2.8, 0.85, sr=sr_out)          # 4 إبراز مخارج الحروف المصرية (ع، ق، ك، ب، ت، د، لّ)
+        x = peak_eq(x, 5200, +1.5, 1.0, sr=sr_out)           # 5 بلورة السواكن المهموسة (س، ش، هـ، ح، خ، ف)
+        x = high_shelf(x, 8500, +0.9, sr=sr_out)             # 6 هواء مايك الاستوديو (Condenser Air 48kHz)
+        if compress_gaps:
+            x = compress_silences(x, sr=sr_out)              # 7 ضبط فواصل التنفس بسلاسة
+        # Attack أبطأ (22ms) يترك الحروف الانفجارية (ب، ت، ك، ق) تعبر بكامل وضوحها دون كبح
+        x = compress(x, -20, 1.75, 0.022, 0.18, 2.2, sr=sr_out)
+        x = room(x, 0.012, sr=sr_out)                        # 8 جفاف استوديو قريب جداً (1.2% فقط لمنع تلاشي السواكن)
+        x, boost = match_reference(x, eff_centroid, max_boost_db=4.5, sr=sr_out)
+    else:
+        eff_centroid = 380.0 if target_centroid is None else float(target_centroid)
+        x = hpf(x, 70, 3, sr=sr_out)                         # 1 تنظيف الترددات المنخفضة (Rumble)
+        x = peak_eq(x, 250, +2.2, 0.9, sr=sr_out)            # 2 دفء الصدر (Body)
+        x = peak_eq(x, 1800, +1.5, 0.8, sr=sr_out)           # 3 وضوح النطق ومخارج الحروف العربية
+        x = peak_eq(x, 4200, -2.8, 1.1, sr=sr_out)           # 4 إزالة الحدة الرقمية (إحساس الـ AI)
+        x = high_shelf(x, 9000, -1.5, sr=sr_out)             # 5 تهدئة السطوع الزائد
+        if compress_gaps:
+            x = compress_silences(x, sr=sr_out)              # 6 ضغط السكتات لإيقاع مشدود
+        x = compress(x, -20, 2.0, 0.012, 0.18, 3.0, sr=sr_out)  # 7 ضغط ديناميكي ناعم
+        x = room(x, 0.05, sr=sr_out)                         # 8 غرفة استوديو خفيفة جداً (5%)
+        x, boost = match_reference(x, eff_centroid, sr=sr_out)  # 8.5 مطابقة مركز الطيف للمرجع
 
     for _ in range(5):                                   # 9 معايرة الارتفاع المتكامل LUFS
         cur_lu = lufs(x, sr=sr_out)
@@ -373,11 +519,17 @@ def main():
     parser.add_argument("--inplace", action="store_true", help="الكتابة فوق نفس الملف الأصلي")
     parser.add_argument("--sr", type=int, default=DEFAULT_SR, help="معدل العينة بالهرتز (الافتراضي: 48000 حسب NAMING.md)")
     parser.add_argument("--lufs", type=float, default=-16.0, help="الارتفاع المستهدف بالـ LUFS (الافتراضي: -16.0)")
-    parser.add_argument("--centroid", type=float, default=380.0, help="مركز الطيف المرجعي بالهرتز (الافتراضي: 380)")
+    parser.add_argument("--centroid", type=float, default=None, help="مركز الطيف المرجعي بالهرتز (تلقائي حسب البروفايل)")
+    parser.add_argument(
+        "--profile",
+        choices=["standard", "omar_rvc"],
+        default="standard",
+        help="بروفايل الماسترينج: standard أو omar_rvc (وضوح مخارج الحروف لبصمة عمر)",
+    )
     parser.add_argument("--keep-silences", action="store_true", help="تعطيل ضغط السكتات الطويلة إذا كان التوقيت مقفولاً مسبقاً")
     args = parser.parse_args()
 
-    print(f"=== سلسلة استوديو رِواق للصوت (LUFS {args.lufs} · TP -1.0dB · {args.sr}Hz) ===")
+    print(f"=== سلسلة استوديو رِواق للصوت ({args.profile} · LUFS {args.lufs} · TP -1.0dB · {args.sr}Hz) ===")
 
     # توسيع المجلدات إن وُجدت
     files = []
@@ -413,6 +565,7 @@ def main():
             target_centroid=args.centroid,
             sr_out=args.sr,
             compress_gaps=not args.keep_silences,
+            clarity_profile=args.profile,
             verbose=True,
         )
 
