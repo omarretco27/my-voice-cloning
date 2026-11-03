@@ -44,6 +44,51 @@ DEFAULT_SCRIPT_AR_EG = (
 )
 
 
+def install_colab_dependencies(force: bool = False) -> None:
+    """تثبيت كافة متطلبات Habibi-TTS و OpenVoice V2 و Faster-Whisper تلقائياً على Google Colab مع كاش جلسة فوري."""
+    marker = Path("/content/.ruwaq_colab_deps_v25_ok")
+    if not force and marker.exists() and os.path.exists("/content/Habibi-TTS/src") and os.path.exists("/content/OpenVoice"):
+        for p in ("/content/Habibi-TTS/src", "/content/OpenVoice"):
+            if p not in sys.path:
+                sys.path.insert(0, p)
+        return
+
+    def _sh(cmd: str) -> None:
+        print(f"⚙️ {cmd}")
+        subprocess.run(cmd, shell=True, check=True)
+
+    print("📦 جاري تجهيز محركات الصوت في الاستوديو (تتم مرة واحدة فقط في الجلسة)...")
+    _sh("apt-get update -qq && apt-get install -y -qq ffmpeg git libportaudio2")
+
+    if not os.path.exists("/content/Habibi-TTS"):
+        _sh("git clone --depth 1 https://github.com/SWivid/Habibi-TTS.git /content/Habibi-TTS")
+    if not os.path.exists("/content/OpenVoice"):
+        _sh("git clone --depth 1 https://github.com/myshell-ai/OpenVoice.git /content/OpenVoice")
+
+    _sh("pip install -q --upgrade pip wheel setuptools")
+    _sh(
+        'pip install -q av audioop-lts faster-whisper==1.2.1 edge-tts==7.3.1 '
+        'soundfile scipy noisereduce librosa huggingface_hub safetensors '
+        'hydra-core omegaconf cached_path tomli "ema_pytorch>=0.5.2" '
+        '"x_transformers>=1.31.14" vocos torchdiffeq pydub rjieba '
+        'eng_to_ipa inflect unidecode pypinyin cn2an jieba'
+    )
+    _sh('pip install -q --no-deps "f5-tts>=1.1.5"')
+
+    for p in ("/content/Habibi-TTS/src", "/content/OpenVoice"):
+        if os.path.exists(p) and p not in sys.path:
+            sys.path.insert(0, p)
+
+    try:
+        import torch
+        torch.backends.cudnn.enabled = False
+    except Exception:
+        pass
+
+    marker.write_text("ok\n", encoding="utf-8")
+    print("✅ اكتمل تجهيز محركات الصوت الأساسية بنجاح!")
+
+
 def find_ruwaq_drive_paths(drive_root: str = "/content/drive/MyDrive") -> dict[str, Path]:
     """يعثر تلقائياً على مجلد «رواق» و«عينة الصوت» على Google Drive مهما كان مسار التركيب."""
     root = Path(drive_root)
@@ -333,17 +378,26 @@ def run_zero_ui_pipeline(
     episode_id: str = "EP_AUTO",
     style_or_guide_file: str = "",
     direct_dubbing_mode: bool = False,
+    custom_text: str | None = None,
 ) -> dict:
-    """الدالة الرئيسية: بضغطة زر واحدة تقرأ العينات والسكريبت من Google Drive وتخرج الماستر الجاهز."""
+    """الدالة الرئيسية: بضغطة زر واحدة تقرأ العينات والسكريبت (أو النص المكتوب مباشرة) وتخرج الماستر الجاهز."""
     import riwaq_colab_app as rvc_app
 
+    install_colab_dependencies()
     paths = find_ruwaq_drive_paths(drive_root)
     speaker_meta = sync_and_curate_voice_samples(paths)
     custom_guide = _resolve_style_or_guide_file(paths, style_or_guide_file)
 
-    script_text = paths["script_file"].read_text(encoding="utf-8").strip()
-    if not script_text:
-        script_text = DEFAULT_SCRIPT_AR_EG
+    if custom_text and custom_text.strip():
+        script_text = custom_text.strip()
+        try:
+            paths["script_file"].write_text(script_text + "\n", encoding="utf-8")
+        except Exception:
+            pass
+    else:
+        script_text = paths["script_file"].read_text(encoding="utf-8").strip() if paths["script_file"].exists() else ""
+        if not script_text:
+            script_text = DEFAULT_SCRIPT_AR_EG
 
     scenes = rvc_app.parse_script_blocks(script_text)
     if not scenes:

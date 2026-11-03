@@ -39,6 +39,39 @@ import make_srt
 
 
 # ── إعداد مجلدات Google Drive القياسية لـ «رِواق» ───────────────────────────
+def install_rvc_environment(applio_dir: str = "/content/Applio", force: bool = False) -> None:
+    """تثبيت بيئة Applio RVC v2 بالكامل (بالإضافة لمحركات الصوت الأساسية إن لم تكن مثبتة) مع كاش فوري للجلسة."""
+    import subprocess as _sp
+
+    try:
+        import auto_run_colab as _arc
+        _arc.install_colab_dependencies(force=force)
+    except Exception:
+        pass
+
+    marker = Path("/content/.ruwaq_rvc_env_v25_ok")
+    if not force and marker.exists() and os.path.exists(os.path.join(applio_dir, "core.py")):
+        if applio_dir not in sys.path:
+            sys.path.insert(0, applio_dir)
+        return
+
+    def _sh(cmd: str) -> None:
+        print(f"⚙️ {cmd}")
+        _sp.run(cmd, shell=True, check=True)
+
+    print("🛠️ جاري تجهيز محرك التدريب السريع RVC v2 (تتم مرة واحدة فقط في الجلسة)...")
+    _sh("apt-get install -y -qq libportaudio2 ffmpeg git")
+    if not os.path.exists(os.path.join(applio_dir, "core.py")):
+        _sh(f"rm -rf {applio_dir} && git clone --depth 1 https://github.com/IAHispano/Applio.git {applio_dir}")
+    _sh("pip install -q faiss-cpu soxr einops onnx onnxruntime webrtcvad-wheels resampy stftpitchshift sounddevice")
+    _sh("pip install -q --no-deps torchcrepe torchfcpe local-attention")
+
+    if applio_dir not in sys.path:
+        sys.path.insert(0, applio_dir)
+    marker.write_text("ok\n", encoding="utf-8")
+    print("✅ اكتمل تجهيز محرك RVC v2 بنجاح!")
+
+
 def ensure_drive_workspace(drive_root: str = "/content/drive/MyDrive/Riwaq_Voice_Lab") -> dict[str, str]:
     root = Path(drive_root)
     paths = {
