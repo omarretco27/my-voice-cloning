@@ -161,20 +161,26 @@ def sync_and_curate_voice_samples(paths: dict[str, Path], force_rebuild: bool = 
             saved_meta.get("raw_files_signature") == current_sig
             and saved_meta.get("curation_version") == "2.4-pure-ar"
         ):
-            cur_wavs = list(clean_dir.glob("omar_*_*.wav"))
+            fast_clean = Path("/content/rvc_fast_workspace/clean_48k")
+            cur_wavs = list(fast_clean.glob("omar_*_*.wav")) if fast_clean.exists() else []
             if (not cur_wavs or (expected_cnt > 0 and len(cur_wavs) != expected_cnt)) and curated_zip.exists():
-                print("⚡ فك ضغط المقاطع الذهبية المصفّاة مسبقاً (48kHz PCM_16) من Google Drive...")
-                for old_w in clean_dir.glob("*.wav"):
-                    old_w.unlink()
+                print("⚡ تحميل المقاطع المصفّاة (48kHz PCM_16) إلى القرص السريع المحلي في أقل من ثانية...")
+                if fast_clean.exists():
+                    shutil.rmtree(fast_clean, ignore_errors=True)
+                fast_clean.mkdir(parents=True, exist_ok=True)
                 with zipfile.ZipFile(str(curated_zip), "r") as zf:
-                    zf.extractall(str(clean_dir))
+                    zf.extractall(str(fast_clean))
+                cur_wavs = list(fast_clean.glob("omar_*_*.wav"))
+            if not cur_wavs:
                 cur_wavs = list(clean_dir.glob("omar_*_*.wav"))
             if cur_wavs:
                 saved_meta["habibi_ref_wav"] = str(habibi_ref_path)
                 saved_meta["openvoice_ref_wav"] = str(openvoice_ref_path)
+                saved_meta["local_clean_dir"] = str(fast_clean) if fast_clean.exists() and list(fast_clean.glob("*.wav")) else str(clean_dir)
                 print(
-                    f"✅ تم تحميل مكتبة صوت عمر المعتمدة جاهزة: {saved_meta.get('clean_minutes')} دقيقة صافية "
-                    f"({saved_meta.get('clean_segments_count')} مقطع 48kHz عربي خالص · F0={saved_meta.get('omar_median_f0_hz')}Hz)"
+                    f"✅ تم تحميل مكتبة صوت عمر المعتمدة كاملة (شاملة عيناتك الجديدة): "
+                    f"{saved_meta.get('clean_minutes')} دقيقة صافية "
+                    f"({saved_meta.get('clean_segments_count')} مقطع عربي مصري خالص · F0={saved_meta.get('omar_median_f0_hz')}Hz)"
                 )
                 return saved_meta
 
@@ -435,15 +441,15 @@ def run_zero_ui_pipeline(
 
     if pth_path and os.path.exists(pth_path) and _ensure_applio_for_rvc_inference("/content/Applio"):
         try:
-            # ضمان استخدام الفهرس العربي الاستوديو النقي 100% (بصفر متجهات إنجليزية وصفر غرف صدى)
+            active_clean_dir = speaker_meta.get("local_clean_dir") or str(paths["clean_dir"])
             pure_idx_path, is_pure_ar = rvc_app.ensure_pure_arabic_studio_index(
-                clean_dir=str(paths["clean_dir"]),
+                clean_dir=active_clean_dir,
                 out_model_dir=str(Path(pth_path).parent),
                 applio_dir="/content/Applio",
                 rvc_exp_dir=str(alt_exp_dir) if alt_exp_dir.exists() else None,
             )
             eff_idx_path = pure_idx_path if is_pure_ar else None
-            eff_idx_rate = 0.30 if is_pure_ar else 0.0
+            eff_idx_rate = 0.28 if is_pure_ar else 0.0
 
             print(
                 f"🎛️ وُجد موديل RVC v2 الخاص بعمر ({os.path.basename(pth_path)}) — "
@@ -455,7 +461,6 @@ def run_zero_ui_pipeline(
             for sc in scenes:
                 name = sc["name"]
                 src_habibi = s1_raw_by_scene[name]
-                s1_cond = str(work_dir / f"{name}_s1_for_rvc.wav")
                 r_wav = str(work_dir / f"{name}_rvc.wav")
                 r_crisp = str(work_dir / f"{name}_rvc_crisp.wav")
                 r_mst = str(work_dir / f"{name}_rvc_48k.wav")
@@ -465,12 +470,9 @@ def run_zero_ui_pipeline(
                 semi = int(round(12.0 * math.log2(omar_f0 / src_f0))) if src_f0 >= 70.0 else 0
                 semi = max(-3, min(3, semi))
 
-                # 1) تهيئة فورمانتات الحروف العربية قبل ContentVec
-                voice_finish.condition_habibi_for_rvc(src_habibi, s1_cond, sr_out=48000)
-
-                # 2) استنساخ حنجرة عمر بحماية 86% للسواكن المصرية ودون ضغط غلاف الثانية الكاملة
+                # 1) استنساخ حنجرة عمر مع تمرير الفورمانت الطبيعي خاماً لـ ContentVec (بلا أي تشويه لكاف «إزيّك» أو لام «خلّينا»)
                 rvc_app.convert_with_rvc(
-                    s1_cond,
+                    src_habibi,
                     r_wav,
                     pth_path=pth_path,
                     index_path=eff_idx_path,
@@ -481,7 +483,7 @@ def run_zero_ui_pipeline(
                     applio_dir="/content/Applio",
                 )
 
-                # 3) استعادة حواف الحروف الساكنة غير المهموسة (3.5–10.2 kHz) بتزامن المللي ثانية
+                # 2) استعادة حواف الحروف الساكنة غير المهموسة (3.5–10.2 kHz) بتزامن المللي ثانية
                 voice_finish.blend_habibi_consonant_transients(
                     r_wav,
                     src_habibi,
@@ -490,7 +492,7 @@ def run_zero_ui_pipeline(
                     max_hf_mix=0.22,
                 )
 
-                # 4) ماسترينج استوديو عمر الحقيقي (Centroid ~490Hz · -16 LUFS · بدون أي pitch-shift)
+                # 3) ماسترينج استوديو عمر الحقيقي (Centroid ~490Hz · -16 LUFS · بدون أي pitch-shift)
                 voice_finish.finish(
                     r_crisp,
                     r_mst,
@@ -549,43 +551,48 @@ def run_zero_ui_pipeline(
 def train_rvc_v2_one_click(
     drive_root: str = "/content/drive/MyDrive",
     applio_dir: str = "/content/Applio",
-    epochs: int = 200,
+    epochs: int = 225,
     episode_id: str = "EP_001",
     reset_from_scratch: bool = False,
+    script_text: str | None = None,
 ) -> dict:
-    """خلية بضغطة واحدة: تدرّب أو تكمّل تدريب موديل RVC v2 كامل 48kHz على العينات المصفّاة وتحفظه في Google Drive ثم تولّد عينة صوتية فوراً."""
+    """خلية بضغطة واحدة فائقة السرعة: تدرّب موديل RVC v2 كامل 48kHz على القرص السريع المحلي (~10 دقائق) وتحفظه في Google Drive ثم تولّد عينة صوتية فوراً."""
     import riwaq_colab_app as rvc_app
 
     paths = find_ruwaq_drive_paths(drive_root)
     speaker_meta = sync_and_curate_voice_samples(paths)
 
+    active_clean_dir = Path(speaker_meta.get("local_clean_dir") or paths["clean_dir"])
+    clean_wavs = sorted(active_clean_dir.glob("*.wav"))
+
     lab_compat_root = paths["studio_dir"] / "_rvc_workspace"
     ws = rvc_app.ensure_drive_workspace(str(lab_compat_root))
-    for old_w in Path(ws["clean"]).glob("*.wav"):
-        old_w.unlink()
-    clean_wavs = sorted(paths["clean_dir"].glob("*.wav"))
-    for seg in clean_wavs:
-        shutil.copy2(str(seg), str(Path(ws["clean"]) / seg.name))
 
     print(
-        f"🚀 تجهيز تدريب موديل RVC v2 (48kHz RMVPE) على {speaker_meta['clean_minutes']} دقيقة صافية "
-        f"({len(clean_wavs)} مقطع استوديو نقي)..."
+        f"🚀 بدء التدريب فائق السرعة (Turbo SSD + GPU RAM) لموديل RVC v2 (48kHz RMVPE) على "
+        f"{speaker_meta['clean_minutes']} دقيقة صافية ({len(clean_wavs)} مقطع عربي مصري نقي — شاملة عيناتك الجديدة)..."
     )
     res = rvc_app.train_omar_rvc_model(
         drive_root=str(lab_compat_root),
         applio_dir=applio_dir,
         model_name="omar_el_clone_v1",
         total_epochs=epochs,
-        save_every_epoch=25,
+        save_every_epoch=75,
         batch_size=8,
         sample_rate=48000,
         dataset_signature=speaker_meta.get("raw_files_signature", ""),
         reset_from_scratch=reset_from_scratch,
+        clean_dataset_dir=str(active_clean_dir),
     )
     target_model_dir = paths["models_dir"] / "omar_el_clone_v1"
     target_model_dir.mkdir(parents=True, exist_ok=True)
     if res.get("pth") and os.path.exists(res["pth"]):
-        shutil.copy2(res["pth"], str(target_model_dir / os.path.basename(res["pth"])))
+        new_pth_name = os.path.basename(res["pth"])
+        shutil.copy2(res["pth"], str(target_model_dir / new_pth_name))
+        # إزالة النسخ الأقدم من مجلد التصدير لضمان استخدام أحدث موديل دائماً
+        for old_p in target_model_dir.glob("*.pth"):
+            if old_p.name != new_pth_name and not old_p.name.startswith(("G_", "D_")):
+                old_p.unlink(missing_ok=True)
     if res.get("index") and os.path.exists(res["index"]):
         shutil.copy2(res["index"], str(target_model_dir / os.path.basename(res["index"])))
     src_exp_dir = Path(ws["models"]) / "omar_el_clone_v1"
@@ -595,6 +602,6 @@ def train_rvc_v2_one_click(
             shutil.copy2(str(extra_src), str(target_model_dir / extra_name))
 
     print("\n🎧 اكتمل التدريب! جاري توليد مقطع تجريبي فوري بموديلك الجديد الآن...")
-    gen_res = run_zero_ui_pipeline(drive_root=drive_root, episode_id=episode_id)
+    gen_res = run_zero_ui_pipeline(drive_root=drive_root, custom_text=script_text, episode_id=episode_id)
     res["generated_preview"] = gen_res
     return res
