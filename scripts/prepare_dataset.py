@@ -154,18 +154,28 @@ def highpass_65hz(x: np.ndarray, sr: int = TARGET_SR) -> np.ndarray:
     return x.astype(np.float32)
 
 
-def eq_presence_match(x: np.ndarray, sr: int = TARGET_SR, boost_db: float = 4.5) -> np.ndarray:
-    """موازنة حضور الصوت وعزل ضوضاء الغرفة اللطيف للتسجيلات الدافئة لتتطابق مع نقاء مايك الاستوديو."""
+def eq_presence_match(x: np.ndarray, sr: int = TARGET_SR, boost_db: float | None = None) -> np.ndarray:
+    """موازنة حضور الصوت وعزل ضوضاء الغرفة التكيّفي للتسجيلات الدافئة لتتطابق مع نقاء مايك الاستوديو دون إيذاء السواكن."""
     y = x - float(np.mean(x))
     if butter is not None and filtfilt is not None and len(y) > 128:
         b_hp, a_hp = butter(2, 85.0 / (sr / 2.0), btype="highpass")
         y = filtfilt(b_hp, a_hp, y).astype(np.float32)
+
+    snr_hp = analyze_signal(y, sr)["snr_db"]
     if nr is not None:
-        y = nr.reduce_noise(y=y, sr=sr, stationary=True, prop_decrease=0.70).astype(np.float32)
-    if butter is not None and filtfilt is not None and len(y) > 128 and boost_db > 0:
+        if snr_hp >= 40.0:
+            prop = 0.25
+        elif snr_hp >= 33.0:
+            prop = 0.45
+        else:
+            prop = 0.65
+        y = nr.reduce_noise(y=y, sr=sr, stationary=True, prop_decrease=prop).astype(np.float32)
+
+    eff_boost = boost_db if boost_db is not None else (2.2 if snr_hp >= 40.0 else (3.0 if snr_hp >= 33.0 else 4.0))
+    if butter is not None and filtfilt is not None and len(y) > 128 and eff_boost > 0:
         b_hi, a_hi = butter(1, 2200.0 / (sr / 2.0), btype="highpass")
         hi = filtfilt(b_hi, a_hi, y).astype(np.float32)
-        gain = (10.0 ** (boost_db / 20.0)) - 1.0
+        gain = (10.0 ** (eff_boost / 20.0)) - 1.0
         y = (y + gain * hi).astype(np.float32)
     return y
 
@@ -514,13 +524,14 @@ def curate_omar_voice_library(
                 f0_human_ar.append(stats["f0_hz"])
         else:
             tier = "warm_ar"
-            cleaned = eq_presence_match(x, sr=TARGET_SR, boost_db=4.5)
+            cleaned = eq_presence_match(x, sr=TARGET_SR, boost_db=None)
             chunks = slice_on_pauses(cleaned, sr=TARGET_SR, min_sec=min_sec, max_sec=max_sec, silence_db=-34.0)
             if stats["f0_hz"] > 0:
                 f0_human_ar.append(stats["f0_hz"])
 
         seg_dur_sum = 0.0
         is_lossless_wav = fp.suffix.lower() == ".wav"
+        written_paths: list[str] = []
         for ci, ch in enumerate(chunks, 1):
             seg_idx += 1
             tier_counts[tier] += 1
@@ -530,6 +541,7 @@ def curate_omar_voice_library(
             seg_name = f"omar_{tier}_{seg_idx:04d}.wav"
             seg_path = os.path.join(clean_dir, seg_name)
             sf.write(seg_path, ch, TARGET_SR, subtype="PCM_16")
+            written_paths.append(seg_path)
 
             if tier == "studio_ar":
                 ch_stats = analyze_signal(ch, TARGET_SR)
@@ -543,7 +555,34 @@ def curate_omar_voice_library(
         stats["tier"] = tier
         stats["segments"] = len(chunks)
         stats["clean_s"] = round(seg_dur_sum, 2)
+        stats["_written_paths"] = written_paths
         accepted_audits.append(stats)
+
+    # إذا تجاوزت العينات العربية المصرية النقية 10 دقائق صافية، نستغني تلقائياً عن المقاطع الإنجليزية
+    # ليكون كلٌّ من موديل الحنجرة (.pth) والفهرس (.index) عربياً مصرياً خالصاً 100% بلا أي لكنة أجنبية!
+    ar_only_s = tier_seconds["studio_ar"] + tier_seconds["warm_ar"]
+    if ar_only_s >= 600.0 and tier_counts["studio_en"] > 0:
+        kept_accepted = []
+        for st_item in accepted_audits:
+            if st_item.get("tier") == "studio_en":
+                for wp in st_item.pop("_written_paths", []):
+                    if os.path.exists(wp):
+                        os.remove(wp)
+                seg_idx -= int(st_item.get("segments", 0))
+                st_item["reason"] = (
+                    f"تم الاكتفاء بـ {round(ar_only_s / 60.0, 2)} دقيقة عربي مصري صافي "
+                    "لعزل أي أثر للكنة الإنجليزية 100% من الحنجرة والفهرس"
+                )
+                rejected_audits.append(st_item)
+            else:
+                st_item.pop("_written_paths", None)
+                kept_accepted.append(st_item)
+        accepted_audits = kept_accepted
+        tier_counts["studio_en"] = 0
+        tier_seconds["studio_en"] = 0.0
+    else:
+        for st_item in accepted_audits:
+            st_item.pop("_written_paths", None)
 
     if seg_idx == 0:
         # fallback آمن في حال كانت كل العينات بسيطة

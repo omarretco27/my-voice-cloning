@@ -61,9 +61,10 @@ def find_ruwaq_drive_paths(drive_root: str = "/content/drive/MyDrive") -> dict[s
     golden_dir = studio_dir / "golden_references"
     models_dir = studio_dir / "models"
     outputs_dir = studio_dir / "outputs"
+    style_refs_dir = studio_dir / "مراجع_الأداء_والانفعال"
     script_file = studio_dir / "سكريبت_الحلقة.txt"
 
-    for d in (samples_dir, studio_dir, clean_dir, golden_dir, models_dir, outputs_dir):
+    for d in (samples_dir, studio_dir, clean_dir, golden_dir, models_dir, outputs_dir, style_refs_dir):
         d.mkdir(parents=True, exist_ok=True)
 
     if not script_file.exists():
@@ -77,6 +78,7 @@ def find_ruwaq_drive_paths(drive_root: str = "/content/drive/MyDrive") -> dict[s
         "golden_dir": golden_dir,
         "models_dir": models_dir,
         "outputs_dir": outputs_dir,
+        "style_refs_dir": style_refs_dir,
         "script_file": script_file,
     }
 
@@ -154,21 +156,25 @@ def sync_and_curate_voice_samples(paths: dict[str, Path], force_rebuild: bool = 
             saved_meta = json.loads(meta_file.read_text(encoding="utf-8"))
         except Exception:
             saved_meta = {}
-        if saved_meta.get("raw_files_signature") == current_sig:
-            studio_ar_wavs = list(clean_dir.glob("omar_studio_ar_*.wav"))
-            if not studio_ar_wavs and curated_zip.exists():
+        expected_cnt = int(saved_meta.get("clean_segments_count") or 0)
+        if (
+            saved_meta.get("raw_files_signature") == current_sig
+            and saved_meta.get("curation_version") == "2.4-pure-ar"
+        ):
+            cur_wavs = list(clean_dir.glob("omar_*_*.wav"))
+            if (not cur_wavs or (expected_cnt > 0 and len(cur_wavs) != expected_cnt)) and curated_zip.exists():
                 print("⚡ فك ضغط المقاطع الذهبية المصفّاة مسبقاً (48kHz PCM_16) من Google Drive...")
                 for old_w in clean_dir.glob("*.wav"):
                     old_w.unlink()
                 with zipfile.ZipFile(str(curated_zip), "r") as zf:
                     zf.extractall(str(clean_dir))
-                studio_ar_wavs = list(clean_dir.glob("omar_studio_ar_*.wav"))
-            if studio_ar_wavs:
+                cur_wavs = list(clean_dir.glob("omar_*_*.wav"))
+            if cur_wavs:
                 saved_meta["habibi_ref_wav"] = str(habibi_ref_path)
                 saved_meta["openvoice_ref_wav"] = str(openvoice_ref_path)
                 print(
                     f"✅ تم تحميل مكتبة صوت عمر المعتمدة جاهزة: {saved_meta.get('clean_minutes')} دقيقة صافية "
-                    f"({saved_meta.get('clean_segments_count')} مقطع 48kHz · F0={saved_meta.get('omar_median_f0_hz')}Hz)"
+                    f"({saved_meta.get('clean_segments_count')} مقطع 48kHz عربي خالص · F0={saved_meta.get('omar_median_f0_hz')}Hz)"
                 )
                 return saved_meta
 
@@ -189,7 +195,7 @@ def sync_and_curate_voice_samples(paths: dict[str, Path], force_rebuild: bool = 
             zf.write(str(seg_p), arcname=seg_p.name)
 
     meta = {
-        "curation_version": "2.2-forensic",
+        "curation_version": "2.4-pure-ar",
         "raw_files_signature": current_sig,
         "raw_files_count": res["examined_files"],
         "accepted_files_count": res["accepted_files"],
@@ -299,12 +305,35 @@ def build_riwaq_episode_zip_from_scenes(
     return out_zip_path
 
 
-def run_zero_ui_pipeline(drive_root: str = "/content/drive/MyDrive", episode_id: str = "EP_AUTO") -> dict:
+def _resolve_style_or_guide_file(paths: dict[str, Path], name_or_path: str) -> str | None:
+    q = (name_or_path or "").strip()
+    if not q:
+        return None
+    direct = Path(q)
+    if direct.exists() and direct.is_file():
+        return str(direct)
+    cand = paths["style_refs_dir"] / q
+    if cand.exists() and cand.is_file():
+        return str(cand)
+    for p in sorted(paths["style_refs_dir"].iterdir()):
+        if p.is_file() and (p.name == q or p.stem == q):
+            return str(p)
+    print(f"⚠️ لم يُعثر على الملف المرجعي «{q}» داخل {paths['style_refs_dir']} — سيتم استخدام مرجع صوت عمر الأصلي.")
+    return None
+
+
+def run_zero_ui_pipeline(
+    drive_root: str = "/content/drive/MyDrive",
+    episode_id: str = "EP_AUTO",
+    style_or_guide_file: str = "",
+    direct_dubbing_mode: bool = False,
+) -> dict:
     """الدالة الرئيسية: بضغطة زر واحدة تقرأ العينات والسكريبت من Google Drive وتخرج الماستر الجاهز."""
     import riwaq_colab_app as rvc_app
 
     paths = find_ruwaq_drive_paths(drive_root)
     speaker_meta = sync_and_curate_voice_samples(paths)
+    custom_guide = _resolve_style_or_guide_file(paths, style_or_guide_file)
 
     script_text = paths["script_file"].read_text(encoding="utf-8").strip()
     if not script_text:
@@ -318,12 +347,25 @@ def run_zero_ui_pipeline(drive_root: str = "/content/drive/MyDrive", episode_id:
     work_dir = habibi_pipe.CACHE_DIR / ("work_" + ts)
     work_dir.mkdir(parents=True, exist_ok=True)
 
-    preset_ref_text = speaker_meta.get("habibi_ref_text", "") or ""
-    safe_ref_wav, safe_ref_text = habibi_pipe.prepare_safe_habibi_reference(
-        speaker_meta["habibi_ref_wav"], preset_ref_text
-    )
-    print(f"📌 المقطع المرجعي الاستوديو (العامية المصرية): {os.path.basename(safe_ref_wav)}")
-    print(f"📌 النص المرجعي: «{safe_ref_text.strip()}»")
+    use_direct_dub = bool(custom_guide and direct_dubbing_mode)
+    if use_direct_dub:
+        print(f"🎭 وضع الدوبلاج التمثيلي المباشر: أخذ النطق والانفعال الكامل من «{os.path.basename(custom_guide)}» وتحويله 100% إلى حنجرة عمر!")
+        scenes = [{"name": "vo_01", "t_in": 0.2, "text": "[دوبلاج أداء تمثيلي مباشر]"}]
+        safe_ref_wav, safe_ref_text = "", ""
+    elif custom_guide:
+        print(f"🎭 استخدام «{os.path.basename(custom_guide)}» كمرجع خارجي للانفعال واللهجة فقط (مع بقاء الحنجرة 100% بصوت عمر)!")
+        tmp_style_48k = str(work_dir / "external_style_ref_48k.wav")
+        ext_arr = prepare_dataset.load_audio_mono_48k(custom_guide, 48000)
+        sf.write(tmp_style_48k, ext_arr, 48000, subtype="PCM_16")
+        safe_ref_wav, safe_ref_text = habibi_pipe.prepare_safe_habibi_reference(tmp_style_48k, "")
+        print(f"📌 النص المرجعي المستخلص: «{safe_ref_text.strip()}»")
+    else:
+        preset_ref_text = speaker_meta.get("habibi_ref_text", "") or ""
+        safe_ref_wav, safe_ref_text = habibi_pipe.prepare_safe_habibi_reference(
+            speaker_meta["habibi_ref_wav"], preset_ref_text
+        )
+        print(f"📌 المقطع المرجعي الاستوديو (العامية المصرية): {os.path.basename(safe_ref_wav)}")
+        print(f"📌 النص المرجعي: «{safe_ref_text.strip()}»")
 
     s1_master_concat = []
     s2_master_concat = []
@@ -342,16 +384,20 @@ def run_zero_ui_pipeline(drive_root: str = "/content/drive/MyDrive", episode_id:
         s1_mst = str(work_dir / f"{name}_s1_48k.wav")
         s2_mst = str(work_dir / f"{name}_s2_48k.wav")
 
-        print(f"🎙️ [{idx}/{len(scenes)}] توليد مشهد {name} بالعامية المصرية: {sc['text'][:65]}...")
-        habibi_pipe.synthesize_s1_habibi_egy(
-            gen_text=sc["text"],
-            ref_audio_path=safe_ref_wav,
-            ref_text=safe_ref_text,
-            out_s1_wav=s1_raw,
-            seed=42,
-            nfe_step=32,
-            speed=0.98,
-        )
+        if use_direct_dub and custom_guide:
+            guide_arr = prepare_dataset.load_audio_mono_48k(custom_guide, 48000)
+            sf.write(s1_raw, guide_arr, 48000, subtype="PCM_16")
+        else:
+            print(f"🎙️ [{idx}/{len(scenes)}] توليد مشهد {name} بالعامية المصرية: {sc['text'][:65]}...")
+            habibi_pipe.synthesize_s1_habibi_egy(
+                gen_text=sc["text"],
+                ref_audio_path=safe_ref_wav,
+                ref_text=safe_ref_text,
+                out_s1_wav=s1_raw,
+                seed=42,
+                nfe_step=32,
+                speed=0.98,
+            )
         s1_raw_by_scene[name] = s1_raw
 
         habibi_pipe.convert_s2_openvoice(
