@@ -610,7 +610,7 @@ def train_rvc_v2_one_click(
     reset_from_scratch: bool = False,
     script_text: str | None = None,
 ) -> dict:
-    """خلية بضغطة واحدة فائقة السرعة: تدرّب موديل RVC v2 كامل 48kHz على القرص السريع المحلي (~10 دقائق) وتحفظه في Google Drive ثم تولّد عينة صوتية فوراً."""
+    """خلية تدريب RVC v2 بضغطة واحدة: تستخدم القرص المحلي السريع، تعرض التقدم مباشرة، وتحفظ نقاط الاستئناف في Google Drive ثم تولّد عينة بعد اكتمال التدريب."""
     import riwaq_colab_app as rvc_app
 
     paths = find_ruwaq_drive_paths(drive_root)

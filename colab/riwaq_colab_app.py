@@ -336,6 +336,199 @@ def _clear_cached_features_keep_weights(model_dir: Path) -> None:
             fp.unlink(missing_ok=True)
 
 
+def _run_applio_training_with_progress(applio_core, local_model_dir: Path, drive_model_dir: Path):
+    """يشغّل تدريب Applio مع بث السجل للخلية، نبضات تقدم دورية، وحفظ نقاط الاستئناف المستقرة على Drive."""
+    import datetime as _dt
+    import queue as _queue
+    import re as _re
+    import signal as _signal
+    import subprocess as _subprocess
+    import threading as _threading
+    import time as _time
+
+    original_run_quiet = applio_core.run_quiet
+    last_copied: dict[str, tuple[int, int]] = {}
+    progress = {"epoch": None, "step": None}
+    last_sync_error = {"message": ""}
+    local_model_dir.mkdir(parents=True, exist_ok=True)
+    train_log = local_model_dir / "riwaq_training.log"
+
+    def sync_stable_checkpoints() -> list[str]:
+        """ينسخ نقاط RVC المكتملة فقط (G/D كزوج واحد) إلى Drive دون الكتابة فوق ملف غير مكتمل."""
+        copied: list[str] = []
+        try:
+            local_model_dir.mkdir(parents=True, exist_ok=True)
+            drive_model_dir.mkdir(parents=True, exist_ok=True)
+            now = _time.time()
+            files = [p for p in local_model_dir.glob("*.pth") if p.is_file()]
+            pairs: dict[str, dict[str, Path]] = {}
+            for f in files:
+                m = _re.fullmatch(r"([GD])_(.+)\.pth", f.name)
+                if m:
+                    pairs.setdefault(m.group(2), {})[m.group(1)] = f
+
+            # انسخ ملفات الوزن العادية فقط بعد استقرارها.
+            for src in (f for f in files if not f.name.startswith(("G_", "D_"))):
+                try:
+                    st = src.stat()
+                    if st.st_size <= 0 or now - st.st_mtime < 20:
+                        continue
+                    signature = (st.st_size, st.st_mtime_ns)
+                    if last_copied.get(src.name) == signature:
+                        continue
+                    dst = drive_model_dir / src.name
+                    tmp = drive_model_dir / (src.name + ".riwaq-partial")
+                    shutil.copy2(src, tmp)
+                    if tmp.stat().st_size != st.st_size:
+                        tmp.unlink(missing_ok=True)
+                        continue
+                    os.replace(tmp, dst)
+                    last_copied[src.name] = signature
+                    copied.append(src.name)
+                except OSError as exc:
+                    last_sync_error["message"] = str(exc)
+
+            # لا تنسخ G أو D منفرداً: ننتظر استقرار الزوج ثم ننسخهما معاً.
+            for suffix, pair in pairs.items():
+                if set(pair) != {"G", "D"}:
+                    continue
+                try:
+                    stats = {kind: pair[kind].stat() for kind in ("G", "D")}
+                    if any(st.st_size <= 0 or now - st.st_mtime < 20 for st in stats.values()):
+                        continue
+                    signatures = {kind: (st.st_size, st.st_mtime_ns) for kind, st in stats.items()}
+                    if all(last_copied.get(pair[kind].name) == signatures[kind] for kind in ("G", "D")):
+                        continue
+                    temporary = {}
+                    for kind in ("G", "D"):
+                        src = pair[kind]
+                        tmp = drive_model_dir / (src.name + ".riwaq-partial")
+                        shutil.copy2(src, tmp)
+                        if tmp.stat().st_size != stats[kind].st_size:
+                            raise OSError(f"حجم النسخة المؤقتة غير مطابق: {src.name}")
+                        temporary[kind] = tmp
+                    for kind in ("G", "D"):
+                        src = pair[kind]
+                        os.replace(temporary[kind], drive_model_dir / src.name)
+                        last_copied[src.name] = signatures[kind]
+                        copied.append(src.name)
+                except OSError as exc:
+                    for tmp in drive_model_dir.glob("*.riwaq-partial"):
+                        tmp.unlink(missing_ok=True)
+                    last_sync_error["message"] = str(exc)
+            return copied
+        except OSError as exc:
+            last_sync_error["message"] = str(exc)
+            return copied
+
+    def monitored_run_quiet(cmd, **kwargs):
+        # أبقِ سلوك Applio الأصلي لبناء الفهرس وأي أوامر غير التدريب.
+        if not any(str(arg).endswith(os.path.join("rvc", "train", "train.py")) for arg in cmd):
+            return original_run_quiet(cmd, **kwargs)
+
+        env = kwargs.pop("env", None) or os.environ.copy()
+        env["PYTHONUNBUFFERED"] = "1"
+        cwd = kwargs.pop("cwd", None)
+        print("📡 سجل التدريب المباشر جاهز. ستظهر اللفة والوقت هنا، وتُنسخ نقاط الاستئناف المستقرة إلى Drive تلقائياً.", flush=True)
+        proc = _subprocess.Popen(
+            cmd,
+            cwd=cwd,
+            env=env,
+            stdout=_subprocess.PIPE,
+            stderr=_subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+            start_new_session=True,
+        )
+        messages: _queue.Queue = _queue.Queue()
+
+        def _read_output():
+            try:
+                assert proc.stdout is not None
+                for line in proc.stdout:
+                    messages.put(line)
+            finally:
+                messages.put(None)
+
+        reader = _threading.Thread(target=_read_output, name="riwaq-applio-log-reader", daemon=True)
+        reader.start()
+        start = _time.monotonic()
+        last_heartbeat = start
+        reader_done = False
+        try:
+            with train_log.open("a", encoding="utf-8", buffering=1) as log:
+                log.write(f"\n--- Training started {_dt.datetime.now().isoformat(timespec='seconds')} ---\n")
+                while not reader_done or proc.poll() is None:
+                    try:
+                        line = messages.get(timeout=1.0)
+                    except _queue.Empty:
+                        line = "__RIWAQ_WAIT__"
+
+                    if line is None:
+                        reader_done = True
+                    elif line != "__RIWAQ_WAIT__":
+                        print(line, end="", flush=True)
+                        log.write(line)
+                        match = _re.search(r"epoch\s*=\s*(\d+)(?:\s*\|\s*step\s*=\s*(\d+))?", line, flags=_re.I)
+                        if match:
+                            progress["epoch"] = int(match.group(1))
+                            if match.group(2):
+                                progress["step"] = int(match.group(2))
+
+                    now = _time.monotonic()
+                    if now - last_heartbeat >= 60:
+                        elapsed = int((now - start) // 60)
+                        synced = sync_stable_checkpoints()
+                        epoch_note = f"آخر لفة ظهرت: {progress['epoch']}" if progress["epoch"] is not None else "بانتظار أول تحديث من التدريب"
+                        print(f"⏳ التدريب ما زال يعمل منذ {elapsed} دقيقة — {epoch_note}.", flush=True)
+                        if synced:
+                            print("☁️ نُسخت نقطة استئناف آمنة إلى Drive: " + ", ".join(synced), flush=True)
+                        if last_sync_error["message"]:
+                            print(f"⚠️ تعذّر نسخ نقطة إلى Drive مؤقتاً: {last_sync_error['message']}", flush=True)
+                            last_sync_error["message"] = ""
+                        last_heartbeat = now
+
+                return_code = proc.wait()
+                final_synced = sync_stable_checkpoints()
+                if final_synced:
+                    print("☁️ تم حفظ آخر نقطة استئناف مستقرة على Drive: " + ", ".join(final_synced), flush=True)
+                return _subprocess.CompletedProcess(cmd, return_code)
+        except KeyboardInterrupt:
+            print("\n🛑 وصل طلب إيقاف التدريب. جاري إيقاف عامل Applio بأمان وحفظ آخر نقطة مكتملة إن وُجدت...", flush=True)
+            try:
+                _signal.killpg(proc.pid, _signal.SIGINT)
+                proc.wait(timeout=25)
+            except _subprocess.TimeoutExpired:
+                _signal.killpg(proc.pid, _signal.SIGTERM)
+                try:
+                    proc.wait(timeout=10)
+                except _subprocess.TimeoutExpired:
+                    _signal.killpg(proc.pid, _signal.SIGKILL)
+                    proc.wait()
+            except ProcessLookupError:
+                pass
+            sync_stable_checkpoints()
+            raise
+        except BaseException:
+            if proc.poll() is None:
+                try:
+                    _signal.killpg(proc.pid, _signal.SIGTERM)
+                    proc.wait(timeout=10)
+                except _subprocess.TimeoutExpired:
+                    _signal.killpg(proc.pid, _signal.SIGKILL)
+                    proc.wait()
+                except ProcessLookupError:
+                    pass
+            raise
+        finally:
+            applio_core.run_quiet = original_run_quiet
+
+    applio_core.run_quiet = monitored_run_quiet
+    return monitored_run_quiet
+
+
 def train_omar_rvc_model(
     drive_root: str = "/content/drive/MyDrive/Riwaq_Voice_Lab",
     applio_dir: str = "/content/Applio",
@@ -349,11 +542,11 @@ def train_omar_rvc_model(
     clean_dataset_dir: str | None = None,
 ) -> dict:
     """
-    خط التدريب الفائق السرعة (Turbo Local-NVMe + GPU-RAM Cache):
-    • ينسخ المقاطع المصفّاة إلى قرص Colab المحلي فائق السرعة (/content/rvc_fast_workspace) مع تفعيل
-      cache_data_in_gpu=True ليختصر وقت التدريب من ~50 دقيقة إلى ~10 دقائق فقط!
-    • يتحقق بصرامة ثلاثية من بصمة العينات (dataset_signature.txt) فلا يمكن أن يفوت أي عينة جديدة أبداً.
-    • ينسخ الموديل النهائي ونقطة الاستئناف مرة واحدة في النهاية إلى Google Drive بأمان تام.
+    خط التدريب (Turbo Local-NVMe + GPU-RAM Cache):
+    • ينسخ المقاطع المصفّاة إلى قرص Colab المحلي (/content/rvc_fast_workspace) ويفعّل cache_data_in_gpu عند ملاءمة VRAM.
+    • يبث تقدم Applio إلى الخلية، ويزامن نقاط الاستئناف المكتملة كل 25 لفة إلى Google Drive لإمكانية المتابعة بعد الانقطاع.
+    • يتحقق من بصمة العينات (dataset_signature.txt) ويحفظ النموذج النهائي والفهرس على Google Drive بعد اكتمال التدريب.
+    • زمن التدريب يتغير حسب سرعة الـ GPU وحالة الجلسة؛ لا نعد بمدة ثابتة.
     """
     ws = ensure_drive_workspace(drive_root)
     src_clean_dir = Path(clean_dataset_dir) if clean_dataset_dir else Path(ws["clean"])
@@ -425,7 +618,7 @@ def train_omar_rvc_model(
         local_filelist_ok = (len(fl_lines) == len(clean_wavs))
 
     use_gpu_cache = len(clean_wavs) <= 260
-    eff_save_every = max(50, int(save_every_epoch))
+    eff_save_every = max(25, int(save_every_epoch))
 
     _ensure_subprocess_cudnn_guard()
     old_cwd = os.getcwd()
@@ -479,7 +672,12 @@ def train_omar_rvc_model(
             f"4/4 🚀 بدء التدريب فائق السرعة لموديل «{model_name}» حتى اللفة {total_epochs} "
             f"(ذاكرة GPU السريعة={'مفعّلة ⚡' if use_gpu_cache else 'تلقائية'})..."
         )
-        applio_core.run_train_script(
+        _run_applio_training_with_progress(
+            applio_core,
+            local_model_dir=fast_model_dir,
+            drive_model_dir=drive_model_dir,
+        )
+        train_status = applio_core.run_train_script(
             model_name=model_name,
             save_every_epoch=eff_save_every,
             save_only_latest=True,
@@ -498,6 +696,8 @@ def train_omar_rvc_model(
             vocoder="HiFi-GAN",
             checkpointing=False,
         )
+        if isinstance(train_status, str) and train_status.lower().startswith("training failed"):
+            raise RuntimeError(train_status)
 
         _call_applio_index(applio_core, model_name=model_name, algo="Auto")
     finally:
